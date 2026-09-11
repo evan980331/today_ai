@@ -24,6 +24,9 @@ function validateEnv() {
     } else {
         console.log('[ENV] OPENCODE_SERVER_URL not set, using direct opencode run');
     }
+    if (process.env.MOCK_OPENCODE === 'true' && process.env.NODE_ENV === 'production') {
+        console.warn('[ENV] WARNING: MOCK_OPENCODE=true in production - mock will be disabled');
+    }
 
     // Never log secrets
     console.log('[ENV] validation passed');

@@ -74,14 +74,41 @@ curl -X POST /api/chat -d '{"prompt":"hello","sessionId":"mock-test-1"}'
 # 無 D:\ 硬編碼 ✓, 無 powershell 依賴 (Linux 路徑) ✓, Render 用 PORT 注入 ✓
 ```
 
-## 5. 尚未解決 / 後續建議
+## 5. Production Readiness 驗證 (2026-09-11 晚)
 
-- **Windows 真實 opencode 執行**：目前 `MOCK_OPENCODE=true` 為 Windows 本地 workaround，真實 `opencode run` 在 Windows Node spawn 仍會 hang (需 powershell)，已改為平台分流但仍需 15s debounce；建議 Render Linux 上驗證真實 `opencode` (無此問題)，或改用 `opencode serve` 常駐 + `--attach` 模式 (已預留 `OPENCODE_SERVER_URL` 參數)
-- **opencode serve 自動啟動**：`ensureServe` 邏輯已移除 (避免 Windows 殘留進程)，若需 `serve` 模式需手動 `opencode serve --port 4096` 再設 `OPENCODE_SERVER_URL`
-- **前端測試**：僅後端 `node:test`，無 Playwright/Cypress E2E；可後續加入 `public/app.js` 的 DOM 測試
+**真實 OpenCode Runtime**
+- `OPENCODE_SERVER_URL` 已可控制：`src/services/opencode.js:14` `isServerUrlConfigured()` + `isServerReachable()` 實際 `fetch` 探測，`run()` 內 `useAttach` 依 env 決定 `opencode run --attach URL --auto`，已用 `opencode serve --port 4096` 實測 `opencode run --attach http://localhost:4096` 可通
+- `MOCK_OPENCODE` 僅 dev/test：`src/services/opencode.js:31` 判斷 `MOCK===true && NODE_ENV!==production` 才 mock，`src/middleware/validateEnv.js` 在 production 警告
+- Timeout 清理：`timer` + `debounce` 雙清，`SIGTERM`→2s 後 `SIGKILL`，`settled` flag 防止重複 `resolve/reject`，併發測試 2 同時 `/api/chat` 無污染，timeout 後 `child.kill` 確保不殘留
 
-## 6. 執行紀錄
+**MCP**
+- `opencode.json:14` env 名稱與 `.env` 完全一致 (`GITHUB_PERSONAL_ACCESS_TOKEN`, `CLIENT_ID` 等)，缺 credentials 時 `opencode` 僅該 MCP 啟動失敗，`src/db/db.js` `saveLog` 吞異常不 crash server
+- `mcp_tools` 欄位保留 `::jsonb`，`src/routes/chat.js:52` 已預留 `mcpTools` 參數 (目前 `null`，待 opencode 輸出解析後可填入)
+
+**Render/Linux**
+- 全 repo `grep -r "D:\\\\" → 0`, `grep powershell` 僅在 `process.platform==='win32'` 分支內，Linux 路徑 `spawn('opencode', ... , shell:false)` 無 Windows 依賴
+- `render.yaml:8` `healthCheckPath: /api/health`，`src/server.js:4` `HOST=0.0.0.0` + `PORT=process.env.PORT`，`package.json` `start: node src/server.js` 可直接 `npm install && npm start`，無需手動 `opencode serve`
+
+**API 併發**
+- 2 併發 `POST /api/chat` 不同 `sessionId` → 各自歷史隔離 ✓
+- `responded` flag + `res.headersSent` 保證 timeout/error 只回一次，`user` 先寫 `ai` 後寫，`ai` 僅一次寫入
+
+## 6. 最終測試 (17 tests, 0 fail)
+
+```
+npm test
+✔ Architecture checks (4)
+✔ Integration: health, session validation (4), chat (4), isolation, pagination, delete, rate limit, DB
+17 pass, 0 fail, duration 5.1s
+```
+
+## 7. 尚未解決 P0/P1
+
+- **P1 Windows 真實 opencode**：`spawn('powershell.exe')` 雖平台分流，但在 Node 內 `opencode run --attach` 仍偶發 30s timeout (直接 `opencode` via bash 則 2s 通)，生產 Linux 無此問題，Windows 建議保持 `MOCK_OPENCODE=true` 開發
+- **P1 mcp_tools 實際值**：目前 `chat.js` 傳 `null`，需解析 opencode 輸出 JSON 才能填入真實工具列表
+
+## 8. 執行紀錄
 
 - 2026-09-11 上午: Multi-Session/Neon/RateLimit 完成 (Phase 1-3)
-- 2026-09-11 下午: 完整架構重構 (10 優先級) + 測試 + 推送 6d86219
-- 2026-09-11 晚: 重構完成，`npm test` 4/4 通過，`api/health|chat|sessions|history` 全綠，準備推送
+- 2026-09-11 下午: 完整架構重構 + 推送 6d86219
+- 2026-09-11 晚: Production readiness 驗證 (17 tests 全綠) + 重構推送 e0c7912 → 本次

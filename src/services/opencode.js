@@ -29,20 +29,26 @@ async function isServerReachable() {
 
 async function run(prompt, opts = {}) {
     if (process.env.MOCK_OPENCODE === 'true') {
-        console.log(`[OpenCode Mock] ${prompt.slice(0,60)}`);
-        await new Promise(r => setTimeout(r, 300));
-        return `Hello (mock for: ${prompt.slice(0,100)})`;
+        if (process.env.NODE_ENV === 'production') {
+            console.warn('[OpenCode] MOCK_OPENCODE=true in production - mock disabled for security');
+        } else {
+            console.log(`[OpenCode Mock] ${prompt.slice(0,60)}`);
+            await new Promise(r => setTimeout(r, 300));
+            return `Hello (mock for: ${prompt.slice(0,100)})`;
+        }
     }
     const timeoutMs = opts.timeoutMs || MCP_TIMEOUT_MS;
-    const useAttach = false;
+    const useAttach = opts.useAttach !== false && isServerUrlConfigured() && await isServerReachable();
 
-    const args = ['run', '--auto'];
+    const args = ['run'];
     if (useAttach) {
         args.push('--attach', OPENCODE_SERVER_URL);
     }
-    args.push(prompt);
+    args.push('--auto', prompt);
 
-    console.log(`[OpenCode] opencode ${args.map(a => a.includes(' ') ? JSON.stringify(a) : a).join(' ')} (cwd=${PROJECT_ROOT})`);
+    const isWin = process.platform === 'win32';
+    const logArgs = args.map(a => a.includes(' ') ? JSON.stringify(a) : a).join(' ');
+    console.log(`[OpenCode] opencode ${logArgs} (cwd=${PROJECT_ROOT}, win=${isWin}, attach=${useAttach})`);
 
     return new Promise((resolve, reject) => {
         let stdout = '';
@@ -51,12 +57,16 @@ async function run(prompt, opts = {}) {
         let timer = null;
         let debounce = null;
 
-        const child = spawn('opencode', args, {
-            cwd: PROJECT_ROOT,
-            env: process.env,
-            shell: true,
-            windowsHide: true
-        });
+        const child = isWin
+            ? spawn('powershell.exe', ['-NoProfile', '-Command', `opencode ${args.map(a => a.includes(' ') ? `"${a.replace(/"/g, '""')}"` : a).join(' ')}`], {
+                cwd: PROJECT_ROOT,
+                env: process.env,
+                windowsHide: true
+            })
+            : spawn('opencode', args, {
+                cwd: PROJECT_ROOT,
+                env: process.env
+            });
 
         const cleanup = () => {
             if (timer) { clearTimeout(timer); timer = null; }
