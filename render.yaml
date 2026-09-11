@@ -11,6 +11,8 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: OPENCODE_SERVER_URL
+        value: http://localhost:4096
       - key: DATABASE_URL
         sync: false
       - key: GITHUB_PERSONAL_ACCESS_TOKEN
