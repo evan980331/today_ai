@@ -16,20 +16,25 @@ validateEnv();
 
 const app = express();
 
-// CORS: allow all in development, restrict via ALLOWED_ORIGINS in production
-const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()) : null;
-if (allowedOrigins) {
+// CORS: restrict via ALLOWED_ORIGINS in production, allow all in development
+const isProd = process.env.NODE_ENV === 'production';
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+    : null;
+
+if (isProd) {
+    // Production: ALLOWED_ORIGINS is required (validated in validateEnv.js)
+    // Never allow * with credentials
     app.use(cors({
         origin: (origin, cb) => {
-            if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return cb(null, true);
-            return cb(new Error('Not allowed by CORS'));
-        }
+            if (!origin) return cb(null, true); // same-origin / curl / server-to-server
+            if (allowedOrigins && allowedOrigins.includes(origin)) return cb(null, true);
+            return cb(null, false); // reject silently — no CORS headers
+        },
+        credentials: true
     }));
 } else {
-    // In production without explicit origins, still allow but log warning
-    if (process.env.NODE_ENV === 'production') {
-        console.warn('[CORS] ALLOWED_ORIGINS not set, allowing all origins');
-    }
+    // Development: allow all origins for local testing
     app.use(cors());
 }
 

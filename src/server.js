@@ -1,7 +1,7 @@
 const app = require('./app');
 
 const PORT = parseInt(process.env.PORT, 10) || 3001;
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 
 const server = app.listen(PORT, HOST, () => {
     console.log(`==========================================`);

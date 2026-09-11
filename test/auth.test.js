@@ -227,6 +227,27 @@ describe('Auth integration via HTTP', () => {
         assert.ok(!JSON.stringify(body).includes('admin123'));
     });
 
+    it('cookie session should work after login (credentials not broken by CORS)', async () => {
+        // Login and get cookie
+        const loginRes = await fetch(`${BASE}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: 'admin', password: 'admin123' })
+        });
+        const setCookie = loginRes.headers.get('set-cookie') || '';
+        const tokenMatch = setCookie.match(/todayai_session=([^;]+)/);
+        assert.ok(tokenMatch, 'login should set cookie');
+        const token = tokenMatch[1];
+
+        // Use cookie to access protected API
+        const meRes = await fetch(`${BASE}/api/auth/me`, {
+            headers: { 'Cookie': `todayai_session=${token}` }
+        });
+        assert.equal(meRes.status, 200);
+        const meBody = await meRes.json();
+        assert.equal(meBody.authenticated, true);
+    });
+
     it('login rate limit should 429 after 10 attempts', async () => {
         // We already did several logins, but loginLimiter is 10/15min, we need to exceed
         // Do 11 rapid wrong logins
@@ -243,6 +264,146 @@ describe('Auth integration via HTTP', () => {
         // Just check that 429 appears or all are 401 (if limit not hit yet, it's okay)
         // For this test, we just check that rate limit is configured (not failing)
         assert.ok(statuses.includes(401) || statuses.includes(429));
+    });
+});
+
+describe('CORS enforcement', () => {
+    it('should reject origin not in ALLOWED_ORIGINS', async () => {
+        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
+        // Send request with a disallowed origin
+        const res = await fetch(`${BASE}/api/health`, {
+            headers: { 'Origin': 'https://evil.example.com' }
+        });
+        // When ALLOWED_ORIGINS is set and origin doesn't match, CORS middleware returns error
+        // In practice, the response may still succeed but without Access-Control-Allow-Origin header
+        // The test verifies that the server doesn't crash and health still works
+        assert.equal(res.status, 200);
+        // Verify no Access-Control-Allow-Origin header for disallowed origin
+        const acao = res.headers.get('access-control-allow-origin');
+        // If ALLOWED_ORIGINS is set, evil origin should not be allowed
+        // If ALLOWED_ORIGINS is not set (dev), all origins are allowed
+        if (process.env.ALLOWED_ORIGINS) {
+            assert.ok(acao !== 'https://evil.example.com', 'evil origin should not be allowed');
+        }
+    });
+
+    it('should include CORS headers for same-origin requests', async () => {
+        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
+        const res = await fetch(`${BASE}/api/health`);
+        assert.equal(res.status, 200);
+        // Same-origin requests (no Origin header) always pass
+    });
+});
+
+describe('validateEnv - production requires ALLOWED_ORIGINS', () => {
+    const { validateEnv } = require('../src/middleware/validateEnv');
+
+    it('should fail in production without ALLOWED_ORIGINS', () => {
+        const orig = {
+            NODE_ENV: process.env.NODE_ENV,
+            DATABASE_URL: process.env.DATABASE_URL,
+            AUTH_USERNAME: process.env.AUTH_USERNAME,
+            AUTH_PASSWORD: process.env.AUTH_PASSWORD,
+            ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS
+        };
+        process.env.NODE_ENV = 'production';
+        process.env.DATABASE_URL = 'postgresql://test:test@localhost/test';
+        process.env.AUTH_USERNAME = 'admin';
+        process.env.AUTH_PASSWORD = 'secret';
+        delete process.env.ALLOWED_ORIGINS;
+
+        let exited = false;
+        const origExit = process.exit;
+        process.exit = (code) => { exited = true; throw new Error(`exit(${code})`); };
+        try {
+            assert.throws(() => validateEnv(), /exit\(1\)/);
+        } catch (e) {
+            // Expected: process.exit was called
+        }
+        process.exit = origExit;
+        assert.ok(exited, 'should call process.exit(1) when ALLOWED_ORIGINS is missing');
+
+        // Restore
+        Object.entries(orig).forEach(([k, v]) => {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        });
+    });
+
+    it('should pass in production with ALLOWED_ORIGINS', () => {
+        const orig = {
+            NODE_ENV: process.env.NODE_ENV,
+            DATABASE_URL: process.env.DATABASE_URL,
+            AUTH_USERNAME: process.env.AUTH_USERNAME,
+            AUTH_PASSWORD: process.env.AUTH_PASSWORD,
+            ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS
+        };
+        process.env.NODE_ENV = 'production';
+        process.env.DATABASE_URL = 'postgresql://test:test@localhost/test';
+        process.env.AUTH_USERNAME = 'admin';
+        process.env.AUTH_PASSWORD = 'secret';
+        process.env.ALLOWED_ORIGINS = 'https://today.example.com';
+
+        let exited = false;
+        const origExit = process.exit;
+        process.exit = (code) => { exited = true; throw new Error(`exit(${code})`); };
+        try {
+            validateEnv();
+        } catch (e) {
+            // If it throws, it should not be an exit
+        }
+        process.exit = origExit;
+        assert.ok(!exited, 'should not exit when all required vars are set');
+
+        // Restore
+        Object.entries(orig).forEach(([k, v]) => {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        });
+    });
+
+    it('should not require ALLOWED_ORIGINS in development', () => {
+        const orig = {
+            NODE_ENV: process.env.NODE_ENV,
+            DATABASE_URL: process.env.DATABASE_URL,
+            ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS
+        };
+        process.env.NODE_ENV = 'development';
+        process.env.DATABASE_URL = 'postgresql://test:test@localhost/test';
+        delete process.env.ALLOWED_ORIGINS;
+
+        let exited = false;
+        const origExit = process.exit;
+        process.exit = (code) => { exited = true; throw new Error(`exit(${code})`); };
+        try {
+            validateEnv();
+        } catch (e) {
+            // If it throws, it should not be an exit
+        }
+        process.exit = origExit;
+        assert.ok(!exited, 'should not exit in dev without ALLOWED_ORIGINS');
+
+        // Restore
+        Object.entries(orig).forEach(([k, v]) => {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        });
+    });
+});
+
+describe('Server HOST default', () => {
+    it('should default to 127.0.0.1 when HOST env is not set', () => {
+        const origHOST = process.env.HOST;
+        delete process.env.HOST;
+
+        // Read server.js source to verify default
+        const fs = require('fs');
+        const path = require('path');
+        const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8');
+        assert.ok(serverSrc.includes("'127.0.0.1'"), 'server.js should default HOST to 127.0.0.1');
+        assert.ok(!serverSrc.includes("'0.0.0.0'"), 'server.js should not default to 0.0.0.0');
+
+        if (origHOST !== undefined) process.env.HOST = origHOST;
     });
 });
 

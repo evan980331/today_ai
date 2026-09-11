@@ -2,7 +2,7 @@ function validateEnv() {
     const isProd = process.env.NODE_ENV === 'production';
     const required = ['DATABASE_URL'];
     if (isProd) {
-        required.push('AUTH_USERNAME', 'AUTH_PASSWORD');
+        required.push('AUTH_USERNAME', 'AUTH_PASSWORD', 'ALLOWED_ORIGINS');
     }
     const optional = ['AUTH_USERNAME', 'AUTH_PASSWORD', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'OPENCODE_SERVER_URL', 'PORT', 'MCP_TIMEOUT_MS', 'ALLOWED_ORIGINS', 'MOCK_OPENCODE'];
 
