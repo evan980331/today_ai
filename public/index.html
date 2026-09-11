@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Today AI - OpenCode Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: { 500: '#6366f1', 600: '#4f46e5' }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans h-screen flex overflow-hidden">
+
+    <!-- 側邊欄 -->
+    <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4 hidden md:flex">
+        <div>
+            <div class="flex items-center space-x-3 px-2 mb-6">
+                <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white">T</div>
+                <span class="text-lg font-bold tracking-wide">Today AI</span>
+            </div>
+            <button onclick="clearChat()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 px-4 rounded-xl flex items-center justify-center space-x-2 transition mb-6 shadow-lg shadow-indigo-600/20">
+                <i data-lucide="plus" class="w-4 h-4"></i>
+                <span>新對話</span>
+            </button>
+            <nav class="space-y-1">
+                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg bg-slate-800 text-indigo-400 font-medium">
+                    <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
+                    <span>工作總覽</span>
+                </a>
+                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition">
+                    <i data-lucide="github" class="w-4 h-4"></i>
+                    <span>GitHub 專案</span>
+                </a>
+                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition">
+                    <i data-lucide="calendar" class="w-4 h-4"></i>
+                    <span>行事曆 & 郵件</span>
+                </a>
+            </nav>
+        </div>
+        <div class="border-t border-slate-800 pt-4 flex items-center space-x-3 px-2">
+            <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-sm font-semibold">OC</div>
+            <div class="flex-1 overflow-hidden">
+                <p class="text-sm font-medium truncate">OpenCode Engine</p>
+                <p class="text-xs text-emerald-400 truncate">● MCP Active</p>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 主區域 -->
+    <main class="flex-1 flex flex-col h-full bg-slate-950 relative">
+        <header class="h-16 border-b border-slate-800/60 flex items-center justify-between px-6 bg-slate-950/80 backdrop-blur">
+            <div class="flex items-center space-x-2 text-sm text-slate-400">
+                <span id="current-date"></span>
+            </div>
+            <div class="flex items-center space-x-3">
+                <span class="text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">OpenCode + MCP</span>
+            </div>
+        </header>
+
+        <!-- 對話/卡片區 -->
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 max-w-3xl w-full mx-auto space-y-6">
+            <div id="welcome-section" class="text-center my-8 space-y-3">
+                <h1 class="text-3xl font-bold tracking-tight text-slate-100">早安，今天想處理什麼任務？</h1>
+                <p class="text-slate-400 text-sm">選擇快速功能，或直接用自然語言交給 OpenCode 處理。</p>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-6 text-left">
+                    <div onclick="usePrompt('查詢我今天的 Google Calendar 行程，並整理出待辦事項')" class="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 cursor-pointer transition group">
+                        <i data-lucide="calendar" class="w-5 h-5 text-indigo-400 mb-2 group-hover:scale-110 transition"></i>
+                        <div class="text-sm font-semibold text-slate-200">今日行程檢查</div>
+                        <div class="text-xs text-slate-400 mt-1">讀取 Google Calendar 整理今日行程</div>
+                    </div>
+                    <div onclick="usePrompt('檢查 GitHub Repo 上標記為 bug 的 Issue，並試著修復程式碼')" class="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 cursor-pointer transition group">
+                        <i data-lucide="git-pull-request" class="w-5 h-5 text-emerald-400 mb-2 group-hover:scale-110 transition"></i>
+                        <div class="text-sm font-semibold text-slate-200">GitHub Bug 修復</div>
+                        <div class="text-xs text-slate-400 mt-1">讀取 Issue 並直接改動本地程式碼</div>
+                    </div>
+                    <div onclick="usePrompt('寫一封今日工作進度摘要信件，準備寄給團隊')" class="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 cursor-pointer transition group">
+                        <i data-lucide="mail" class="w-5 h-5 text-amber-400 mb-2 group-hover:scale-110 transition"></i>
+                        <div class="text-sm font-semibold text-slate-200">撰寫進度郵件</div>
+                        <div class="text-xs text-slate-400 mt-1">透過 Gmail MCP 起草與發送郵件</div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="messages" class="space-y-4"></div>
+        </div>
+
+        <!-- 輸入框 -->
+        <div class="p-4 max-w-3xl w-full mx-auto">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-2 shadow-2xl focus-within:border-indigo-500/50 transition">
+                <textarea id="user-input" rows="2" placeholder="輸入指令，例如：『重構 src/server.js 程式碼，增加日誌記錄』..." class="w-full bg-transparent text-slate-100 placeholder-slate-500 resize-none outline-none px-3 pt-2 text-sm"></textarea>
+                <div class="flex items-center justify-between pt-2 border-t border-slate-800/50 px-2">
+                    <span class="text-xs text-slate-500">提示：Enter 發送，Shift+Enter 換行</span>
+                    <button onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-xl transition flex items-center justify-center">
+                        <i data-lucide="arrow-up" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        lucide.createIcons();
+
+        document.getElementById('current-date').innerText = new Date().toLocaleDateString('zh-TW', {
+            year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
+        });
+
+        const input = document.getElementById('user-input');
+        const messagesDiv = document.getElementById('messages');
+        const welcomeSection = document.getElementById('welcome-section');
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function usePrompt(text) {
+            input.value = text;
+            sendMessage();
+        }
+
+        async function sendMessage() {
+            const text = input.value.trim();
+            if (!text) return;
+
+            welcomeSection.classList.add('hidden');
+            appendMessage('user', text);
+            input.value = '';
+
+            const loadingId = appendLoading();
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: text })
+                });
+
+                const data = await res.json();
+                removeLoading(loadingId);
+
+                if (data.result) {
+                    appendMessage('ai', data.result);
+                } else {
+                    appendMessage('ai', '執行失敗或出錯：' + (data.error || '無回應'));
+                }
+            } catch (err) {
+                removeLoading(loadingId);
+                appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。');
+            }
+        }
+
+        function appendMessage(role, content) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `flex space-x-3 ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+
+            if (role === 'user') {
+                wrapper.innerHTML = `<div class="bg-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 text-sm max-w-lg shadow-md">${escapeHtml(content)}</div>`;
+            } else {
+                wrapper.innerHTML = `
+                    <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1">T</div>
+                    <div class="bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-xl leading-relaxed shadow-md whitespace-pre-wrap">${escapeHtml(content)}</div>
+                `;
+            }
+            messagesDiv.appendChild(wrapper);
+            scrollToBottom();
+        }
+
+        function appendLoading() {
+            const id = 'loading-' + Date.now();
+            const wrapper = document.createElement('div');
+            wrapper.id = id;
+            wrapper.className = 'flex space-x-3 justify-start';
+            wrapper.innerHTML = `
+                <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1">T</div>
+                <div class="bg-slate-900 border border-slate-800 text-slate-400 rounded-2xl rounded-tl-none px-4 py-3 text-sm flex items-center space-x-2">
+                    <span class="animate-pulse">OpenCode 正在處理並調用 MCP 工具...</span>
+                </div>
+            `;
+            messagesDiv.appendChild(wrapper);
+            scrollToBottom();
+            return id;
+        }
+
+        function removeLoading(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        async function loadHistory() {
+            try {
+                const res = await fetch('/api/history?limit=100');
+                const rows = await res.json();
+                if (Array.isArray(rows) && rows.length > 0) {
+                    welcomeSection.classList.add('hidden');
+                    rows.forEach(r => appendMessage(r.role === 'user' ? 'user' : 'ai', r.content));
+                }
+            } catch(e) { console.warn('history load failed', e); }
+        }
+        loadHistory();
+
+        async function clearChat() {
+            messagesDiv.innerHTML = '';
+            welcomeSection.classList.remove('hidden');
+            try { await fetch('/api/history?sessionId=default', { method: 'DELETE' }); } catch(e) {}
+        }
+
+        function scrollToBottom() {
+            const container = document.getElementById('chat-container');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+    </script>
+</body>
+</html>
