@@ -70,6 +70,25 @@ describe('Auth middleware - unit', () => {
         destroySession(token);
     });
 
+    it('should reject Bearer header (cookie-only auth)', () => {
+        process.env.AUTH_USERNAME = 'admin';
+        process.env.AUTH_PASSWORD = 'secret123';
+        const { createSession } = require('../src/middleware/auth');
+        const token = createSession('admin');
+        const req = {
+            path: '/api/chat',
+            headers: { authorization: `Bearer ${token}` },
+            cookies: {}
+        };
+        const res = mockRes();
+        let next = false;
+        authMiddleware(req, res, () => { next = true; });
+        assert.equal(next, false);
+        assert.equal(res.statusCode, 401);
+        const { destroySession } = require('../src/middleware/auth');
+        destroySession(token);
+    });
+
     it('should allow when no AUTH_USERNAME configured in dev', () => {
         const origU = process.env.AUTH_USERNAME;
         const origP = process.env.AUTH_PASSWORD;

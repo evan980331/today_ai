@@ -63,14 +63,9 @@ const cleanupInterval = setInterval(() => {
 if (cleanupInterval.unref) cleanupInterval.unref();
 
 function getTokenFromRequest(req) {
-    // Prefer HttpOnly cookie
     if (req.cookies && req.cookies.todayai_session) {
         return req.cookies.todayai_session;
     }
-    // Fallback: Authorization Bearer for compatibility (but frontend should use Cookie)
-    const auth = req.headers['authorization'] || '';
-    const m = auth.match(/^Bearer\s+(.+)$/);
-    if (m) return m[1].trim();
     return null;
 }
 
