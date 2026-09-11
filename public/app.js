@@ -15,6 +15,81 @@ let currentSessionId = (() => {
 })();
 if (!localStorage.getItem('todayai_session')) localStorage.setItem('todayai_session', currentSessionId);
 
+// --- Auth (Cookie Session, HttpOnly) ---
+const loginOverlay = document.getElementById('login-overlay');
+const loginUserEl = document.getElementById('login-username');
+const loginPassEl = document.getElementById('login-password');
+const loginErrorEl = document.getElementById('login-error');
+
+async function checkAuth() {
+    try {
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        if (res.ok) {
+            loginOverlay.classList.add('hidden');
+            return true;
+        }
+    } catch {}
+    loginOverlay.classList.remove('hidden');
+    return false;
+}
+
+async function doLogin() {
+    const username = (loginUserEl.value || '').trim();
+    const password = loginPassEl.value || '';
+    loginErrorEl.classList.add('hidden');
+    if (!username || !password) {
+        loginErrorEl.textContent = '請輸入帳號與密碼';
+        loginErrorEl.classList.remove('hidden');
+        return;
+    }
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            loginErrorEl.textContent = res.status === 429 ? '登入過於頻繁，請稍後再試' : '帳號或密碼錯誤';
+            loginErrorEl.classList.remove('hidden');
+            return;
+        }
+        loginPassEl.value = '';
+        loginOverlay.classList.add('hidden');
+        // Verify session
+        const me = await fetch('/api/auth/me', { credentials: 'include' });
+        if (me.ok) {
+            loadHistory();
+            loadSessions();
+        }
+    } catch (e) {
+        loginErrorEl.textContent = '連線失敗';
+        loginErrorEl.classList.remove('hidden');
+    }
+}
+window.doLogin = doLogin;
+
+async function doLogout() {
+    try {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
+    // Clear UI state but not password
+    messagesDiv.innerHTML = '';
+    welcomeSection.classList.remove('hidden');
+    loginOverlay.classList.remove('hidden');
+    loginUserEl.value = '';
+    loginPassEl.value = '';
+}
+window.doLogout = doLogout;
+
+// Allow Enter on login inputs
+if (loginUserEl && loginPassEl) {
+    [loginUserEl, loginPassEl].forEach(el => el.addEventListener('keydown', e => {
+        if (e.key === 'Enter') doLogin();
+    }));
+}
+
 const input = document.getElementById('user-input');
 const messagesDiv = document.getElementById('messages');
 const welcomeSection = document.getElementById('welcome-section');
@@ -51,12 +126,23 @@ async function sendMessage() {
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         removeLoading(loadingId);
         if (!res.ok) {
-            appendMessage('ai', `錯誤 ${res.status}: ${escapeHtml(data.error || '未知錯誤')}${data.details ? '\n' + escapeHtml(data.details.slice(0,300)) : ''}`);
+            if (res.status === 401) {
+                loginOverlay.classList.remove('hidden');
+                appendMessage('ai', '未授權 (401)：請先登入');
+                return;
+            }
+            let msg = `錯誤 ${res.status}: ${escapeHtml(data.error || '未知錯誤')}`;
+            if (res.status === 429) msg = '請求過於頻繁 (429)：請稍後再試';
+            else if (res.status === 504) msg = 'OpenCode 超時 (504)：請稍後重試';
+            else if (res.status === 500) msg = `執行失敗 (500)：${escapeHtml((data.details || data.error || '').slice(0,300))}`;
+            else if (data.details) msg += `\n${escapeHtml(data.details.slice(0,300))}`;
+            appendMessage('ai', msg);
             if (data.sessionId) {
                 currentSessionId = data.sessionId;
                 localStorage.setItem('todayai_session', currentSessionId);
@@ -126,7 +212,8 @@ function removeLoading(id) {
 async function loadHistory() {
     messagesDiv.innerHTML = '';
     try {
-        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}&limit=100`);
+        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}&limit=100`, { credentials: 'include' });
+        if (res.status === 401) { loginOverlay.classList.remove('hidden'); return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const rows = await res.json();
         if (Array.isArray(rows) && rows.length > 0) {
@@ -140,7 +227,8 @@ async function loadHistory() {
 
 async function loadSessions() {
     try {
-        const res = await fetch('/api/sessions?limit=50');
+        const res = await fetch('/api/sessions?limit=50', { credentials: 'include' });
+        if (res.status === 401) { document.getElementById('session-count').textContent = '需登入'; return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const sessions = await res.json();
         document.getElementById('session-count').textContent = sessions.length ? `${sessions.length} 則` : '';
@@ -206,7 +294,8 @@ window.createNewSession = createNewSession;
 async function deleteSession(id) {
     if (!confirm('確定刪除此對話？')) return;
     try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' });
+        if (res.status === 401) { loginOverlay.classList.remove('hidden'); return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch(e) { console.warn('delete failed', e); }
     if (id === currentSessionId) createNewSession();
@@ -215,8 +304,12 @@ async function deleteSession(id) {
 window.deleteSession = deleteSession;
 window.clearChat = createNewSession;
 
-loadHistory();
-loadSessions();
+checkAuth().then(ok => {
+    if (ok) {
+        loadHistory();
+        loadSessions();
+    }
+});
 
 function scrollToBottom() {
     const container = document.getElementById('chat-container');

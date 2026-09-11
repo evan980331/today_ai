@@ -3,11 +3,14 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
+const cookieParser = require('cookie-parser');
 const { validateEnv } = require('./middleware/validateEnv');
 const { initDb } = require('./db/db');
 const healthRouter = require('./routes/health');
 const chatRouter = require('./routes/chat');
 const sessionsRouter = require('./routes/sessions');
+const { authMiddleware, loginHandler, logoutHandler, meHandler } = require('./middleware/auth');
+const { loginLimiter } = require('./middleware/rateLimit');
 
 validateEnv();
 
@@ -32,6 +35,7 @@ if (allowedOrigins) {
 
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+app.use(cookieParser());
 
 // Init DB (non-blocking, does not crash on failure)
 initDb();
@@ -44,8 +48,12 @@ if (pingInterval.unref) pingInterval.unref();
 // Static frontend
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Routes
+// Routes: health & login are public, rest requires auth
 app.use('/api', healthRouter);
+app.post('/api/auth/login', loginLimiter, loginHandler);
+app.post('/api/auth/logout', logoutHandler);
+app.use('/api', authMiddleware);
+app.get('/api/auth/me', meHandler);
 app.use('/api', chatRouter);
 app.use('/api', sessionsRouter);
 

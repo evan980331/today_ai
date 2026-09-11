@@ -1,20 +1,35 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
-// Integration tests require running app - use fetch against live server
-// These tests assume MOCK_OPENCODE=true for chat success, and real DB (Neon)
-
 const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
 
+let authCookie = '';
+
 async function fetchJson(url, opts = {}) {
+    opts.headers = { ...(opts.headers || {}), ...(authCookie ? { 'Cookie': authCookie } : {}) };
     const res = await fetch(url, opts);
     const body = await res.json().catch(() => ({}));
     return { res, body };
 }
 
+before(async () => {
+    // Login with default test credentials (must match .env AUTH_USERNAME/PASSWORD)
+    const res = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: 'admin123' })
+    });
+    const setCookie = res.headers.get('set-cookie') || '';
+    const m = setCookie.match(/todayai_session=([^;]+)/);
+    if (m) authCookie = `todayai_session=${m[1]}`;
+    // Also set for subsequent fetches
+});
+
 describe('Integration: health', () => {
     it('GET /api/health should return ok', async () => {
-        const { res, body } = await fetchJson(`${BASE}/api/health`);
+        // Health is public, no auth needed, but we also test with auth
+        const res = await fetch(`${BASE}/api/health`);
+        const body = await res.json();
         assert.equal(res.status, 200);
         assert.equal(body.status, 'ok');
         assert.ok(['connected', 'not_configured', 'error'].some(s => body.db.includes(s) || body.db === s));
@@ -49,6 +64,7 @@ describe('Integration: chat', () => {
         assert.equal(res.status, 200);
         assert.ok(body.result);
         assert.equal(body.sessionId, sid);
+        assert.ok(Array.isArray(body.mcpTools));
     });
 
     it('should persist user and ai to history', async () => {
@@ -81,7 +97,7 @@ describe('Integration: chat', () => {
     });
 
     after(async () => {
-        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' }).catch(()=>{});
+        await fetchJson(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' }).catch(()=>{});
     });
 });
 
@@ -96,8 +112,8 @@ describe('Integration: session isolation', () => {
         assert.ok(histA.every(r => r.session_id === sidA));
         assert.ok(histB.every(r => r.session_id === sidB));
         assert.ok(!histA.some(r => r.content.includes('msg B')));
-        await fetch(`${BASE}/api/sessions/${sidA}`, { method: 'DELETE' });
-        await fetch(`${BASE}/api/sessions/${sidB}`, { method: 'DELETE' });
+        await fetchJson(`${BASE}/api/sessions/${sidA}`, { method: 'DELETE' });
+        await fetchJson(`${BASE}/api/sessions/${sidB}`, { method: 'DELETE' });
     });
 });
 
@@ -115,7 +131,7 @@ describe('Integration: history pagination', () => {
             const { body: beforeRows } = await fetchJson(`${BASE}/api/history?sessionId=${sid}&limit=10&before=${encodeURIComponent(before)}`);
             assert.ok(beforeRows.length < all.length);
         }
-        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' });
+        await fetchJson(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' });
     });
 });
 
@@ -142,10 +158,10 @@ describe('Integration: rate limit', () => {
     it('should 429 after exceeding history limit (100/min)', async () => {
         const promises = [];
         for (let i = 0; i < 101; i++) {
-            promises.push(fetch(`${BASE}/api/sessions?limit=1`));
+            promises.push(fetchJson(`${BASE}/api/sessions?limit=1`));
         }
         const results = await Promise.all(promises);
-        const statuses = results.map(r => r.status);
+        const statuses = results.map(r => r.res.status);
         assert.ok(statuses.includes(429), 'should have at least one 429');
     });
 });

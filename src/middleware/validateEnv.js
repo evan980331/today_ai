@@ -1,6 +1,10 @@
 function validateEnv() {
+    const isProd = process.env.NODE_ENV === 'production';
     const required = ['DATABASE_URL'];
-    const optional = ['GITHUB_PERSONAL_ACCESS_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'OPENCODE_SERVER_URL', 'PORT', 'MCP_TIMEOUT_MS', 'ALLOWED_ORIGINS'];
+    if (isProd) {
+        required.push('AUTH_USERNAME', 'AUTH_PASSWORD');
+    }
+    const optional = ['AUTH_USERNAME', 'AUTH_PASSWORD', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'OPENCODE_SERVER_URL', 'PORT', 'MCP_TIMEOUT_MS', 'ALLOWED_ORIGINS', 'MOCK_OPENCODE'];
 
     const missing = required.filter(k => !process.env[k] || !process.env[k].trim());
     if (missing.length) {
@@ -24,8 +28,11 @@ function validateEnv() {
     } else {
         console.log('[ENV] OPENCODE_SERVER_URL not set, using direct opencode run');
     }
-    if (process.env.MOCK_OPENCODE === 'true' && process.env.NODE_ENV === 'production') {
+    if (process.env.MOCK_OPENCODE === 'true' && isProd) {
         console.warn('[ENV] WARNING: MOCK_OPENCODE=true in production - mock will be disabled');
+    }
+    if (!isProd && (!process.env.AUTH_USERNAME || !process.env.AUTH_PASSWORD)) {
+        console.warn('[ENV] AUTH_USERNAME/PASSWORD not set (auth will allow all in dev)');
     }
 
     // Never log secrets

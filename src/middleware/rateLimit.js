@@ -15,4 +15,13 @@ const historyLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-module.exports = { chatLimiter, historyLimiter };
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true,
+    message: { error: '登入嘗試過多，請 15 分鐘後再試' }
+});
+
+module.exports = { chatLimiter, historyLimiter, loginLimiter };

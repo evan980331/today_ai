@@ -20,6 +20,30 @@
     </script>
 </head>
 <body class="bg-slate-950 text-slate-100 font-sans h-screen flex overflow-hidden">
+    <!-- 登入畫面 -->
+    <div id="login-overlay" class="fixed inset-0 bg-slate-950 z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+            <div class="flex items-center space-x-3 mb-6">
+                <div class="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center font-bold text-white">T</div>
+                <div>
+                    <h2 class="text-lg font-bold">Today AI 登入</h2>
+                    <p class="text-xs text-slate-400">請輸入帳號與密碼</p>
+                </div>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-slate-400">帳號</label>
+                    <input id="login-username" type="text" autocomplete="username" class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-indigo-500" placeholder="username">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">密碼</label>
+                    <input id="login-password" type="password" autocomplete="current-password" class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-indigo-500" placeholder="password">
+                </div>
+                <div id="login-error" class="text-xs text-red-400 hidden"></div>
+                <button onclick="doLogin()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2.5 rounded-xl transition">登入</button>
+            </div>
+        </div>
+    </div>
 
     <!-- 側邊欄 -->
     <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4 hidden md:flex">
@@ -66,6 +90,7 @@
             </div>
             <div class="flex items-center space-x-3">
                 <span class="text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">OpenCode + MCP</span>
+                <button onclick="doLogout()" class="text-xs px-3 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700">登出</button>
             </div>
         </header>
 

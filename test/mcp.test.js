@@ -1,5 +1,21 @@
-const { describe, it } = require('node:test');
+const { describe, it, before } = require('node:test');
 const assert = require('node:assert/strict');
+
+const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
+let authCookie = '';
+before(async () => {
+    const res = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: 'admin123' })
+    });
+    const setCookie = res.headers.get('set-cookie') || '';
+    const m = setCookie.match(/todayai_session=([^;]+)/);
+    if (m) authCookie = `todayai_session=${m[1]}`;
+});
+function authHeaders(extra = {}) {
+    return { ...extra, ...(authCookie ? { 'Cookie': authCookie } : {}) };
+}
 
 describe('MCP parsing', () => {
     const { parseMcpTools } = require('../src/services/opencode');
@@ -15,7 +31,7 @@ describe('MCP parsing', () => {
         const tools = parseMcpTools(raw);
         assert.ok(tools.includes('github_search_repositories'));
         assert.ok(tools.includes('github_get_file_contents'));
-        assert.equal(tools.length, 2); // deduplicated
+        assert.equal(tools.length, 2);
     });
 
     it('should parse JSON format tool_use', () => {
@@ -34,9 +50,7 @@ describe('MCP parsing', () => {
 
     it('should use mock MCP detection', async () => {
         const svc = require('../src/services/opencode');
-        // With MOCK, prompt containing github should return mock tool
         const res = await svc.run('列出 GitHub repo', { timeoutMs: 5000 });
-        // run returns object with mcpTools when MOCK, check
         if (typeof res === 'object') {
             assert.ok(Array.isArray(res.mcpTools));
         }
@@ -45,64 +59,55 @@ describe('MCP parsing', () => {
 
 describe('MCP DB persistence', () => {
     it('chat without MCP should save [] not null', async () => {
-        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
         const sid = `mcp-empty-${Date.now()}`;
-        const { body } = await (async () => {
-            const res = await fetch(`${BASE}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: 'hello simple no tools', sessionId: sid })
-            });
-            return { body: await res.json() };
-        })();
+        const res = await fetch(`${BASE}/api/chat`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ prompt: 'hello simple no tools', sessionId: sid })
+        });
+        const body = await res.json();
         assert.ok(Array.isArray(body.mcpTools));
         assert.equal(body.mcpTools.length, 0);
-        // Check DB via history
-        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`);
+        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`, { headers: authHeaders() });
         const hist = await histRes.json();
         const aiRow = hist.find(r => r.role === 'ai');
         assert.ok(aiRow);
-        // mcp_tools should be [] (jsonb) or null, but not string "null"
         assert.ok(aiRow.mcp_tools === null || Array.isArray(aiRow.mcp_tools));
         if (Array.isArray(aiRow.mcp_tools)) {
             assert.equal(aiRow.mcp_tools.length, 0);
         }
-        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' });
+        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE', headers: authHeaders() });
     });
 
     it('chat with github should save tool name', async () => {
-        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
         const sid = `mcp-github-${Date.now()}`;
-        const { body } = await (async () => {
-            const res = await fetch(`${BASE}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: '列出 GitHub repo 資訊', sessionId: sid })
-            });
-            return { body: await res.json() };
-        })();
+        const res = await fetch(`${BASE}/api/chat`, {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ prompt: '列出 GitHub repo 資訊', sessionId: sid })
+        });
+        const body = await res.json();
         assert.ok(Array.isArray(body.mcpTools));
         assert.ok(body.mcpTools.includes('github_get_file_contents'));
-        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`);
+        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`, { headers: authHeaders() });
         const hist = await histRes.json();
         const aiRow = hist.find(r => r.role === 'ai');
         assert.ok(Array.isArray(aiRow.mcp_tools));
         assert.ok(aiRow.mcp_tools.includes('github_get_file_contents'));
-        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' });
+        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE', headers: authHeaders() });
     });
 
     it('should not duplicate AI response on success', async () => {
-        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
         const sid = `mcp-dedup-${Date.now()}`;
         await fetch(`${BASE}/api/chat`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ prompt: 'hello dedup', sessionId: sid })
         });
-        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`);
+        const histRes = await fetch(`${BASE}/api/history?sessionId=${sid}`, { headers: authHeaders() });
         const hist = await histRes.json();
         const aiRows = hist.filter(r => r.role === 'ai');
         assert.equal(aiRows.length, 1, 'AI should be saved exactly once');
-        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE' });
+        await fetch(`${BASE}/api/sessions/${sid}`, { method: 'DELETE', headers: authHeaders() });
     });
 });

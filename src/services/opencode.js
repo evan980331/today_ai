@@ -11,7 +11,8 @@ function getOpencodeCmd() {
 }
 
 function isServerUrlConfigured() {
-    return !!OPENCODE_SERVER_URL && /^https?:\/\//.test(OPENCODE_SERVER_URL);
+    const url = process.env.OPENCODE_SERVER_URL || '';
+    return !!url && /^https?:\/\//.test(url);
 }
 
 async function isServerReachable() {
