@@ -4,7 +4,6 @@ function validateEnv() {
     if (isProd) {
         required.push('AUTH_USERNAME', 'AUTH_PASSWORD', 'ALLOWED_ORIGINS');
     }
-    const optional = ['AUTH_USERNAME', 'AUTH_PASSWORD', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'OPENCODE_SERVER_URL', 'PORT', 'MCP_TIMEOUT_MS', 'ALLOWED_ORIGINS', 'MOCK_OPENCODE'];
 
     const missing = required.filter(k => !process.env[k] || !process.env[k].trim());
     if (missing.length) {
@@ -14,6 +13,26 @@ function validateEnv() {
         console.error('Check .env or deployment env vars');
         console.error('==========================================');
         process.exit(1);
+    }
+
+    // Production: validate ALLOWED_ORIGINS content
+    if (isProd && process.env.ALLOWED_ORIGINS) {
+        const origins = process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
+        if (origins.length === 0) {
+            console.error('[ENV] ALLOWED_ORIGINS is empty or whitespace-only');
+            process.exit(1);
+        }
+        if (origins.includes('*')) {
+            console.error('[ENV] ALLOWED_ORIGINS must not use wildcard * in production (credentials security)');
+            process.exit(1);
+        }
+        // Validate each origin looks like a URL
+        for (const o of origins) {
+            if (!o.startsWith('http://') && !o.startsWith('https://')) {
+                console.error(`[ENV] ALLOWED_ORIGINS entry "${o}" must start with http:// or https://`);
+                process.exit(1);
+            }
+        }
     }
 
     // Warn for optional but not exit
