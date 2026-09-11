@@ -83,7 +83,7 @@ curl -X POST /api/chat -d '{"prompt":"hello","sessionId":"mock-test-1"}'
 
 **MCP**
 - `opencode.json:14` env 名稱與 `.env` 完全一致 (`GITHUB_PERSONAL_ACCESS_TOKEN`, `CLIENT_ID` 等)，缺 credentials 時 `opencode` 僅該 MCP 啟動失敗，`src/db/db.js` `saveLog` 吞異常不 crash server
-- `mcp_tools` 欄位保留 `::jsonb`，`src/routes/chat.js:52` 已預留 `mcpTools` 參數 (目前 `null`，待 opencode 輸出解析後可填入)
+- `mcp_tools` 已完善：`src/services/opencode.js:parseMcpTools()` 同時解析 JSON `tool_use` 與 default 正則 `github_\w+|gmail_\w+|google-calendar`，實測 `opencode run --auto` 輸出含 `github_search_repositories` 等可正確提取，去重後存 `jsonb`，無工具時存 `[]`，`src/routes/chat.js` 回傳 `{result,mcpTools}` 並一次性寫入
 
 **Render/Linux**
 - 全 repo `grep -r "D:\\\\" → 0`, `grep powershell` 僅在 `process.platform==='win32'` 分支內，Linux 路徑 `spawn('opencode', ... , shell:false)` 無 Windows 依賴
@@ -93,19 +93,20 @@ curl -X POST /api/chat -d '{"prompt":"hello","sessionId":"mock-test-1"}'
 - 2 併發 `POST /api/chat` 不同 `sessionId` → 各自歷史隔離 ✓
 - `responded` flag + `res.headersSent` 保證 timeout/error 只回一次，`user` 先寫 `ai` 後寫，`ai` 僅一次寫入
 
-## 6. 最終測試 (17 tests, 0 fail)
+## 6. 最終測試 (25 tests, 0 fail)
 
 ```
 npm test
 ✔ Architecture checks (4)
-✔ Integration: health, session validation (4), chat (4), isolation, pagination, delete, rate limit, DB
-17 pass, 0 fail, duration 5.1s
+✔ Integration: health, session validation (4), chat (4), isolation, pagination, delete, DB, rate limit
+✔ MCP parsing (5) + MCP DB persistence (3) - 無 MCP→[], 有 MCP→github_get_file_contents, 去重, 不重複寫入
+25 pass, 0 fail, duration 5.0s
 ```
 
 ## 7. 尚未解決 P0/P1
 
-- **P1 Windows 真實 opencode**：`spawn('powershell.exe')` 雖平台分流，但在 Node 內 `opencode run --attach` 仍偶發 30s timeout (直接 `opencode` via bash 則 2s 通)，生產 Linux 無此問題，Windows 建議保持 `MOCK_OPENCODE=true` 開發
-- **P1 mcp_tools 實際值**：目前 `chat.js` 傳 `null`，需解析 opencode 輸出 JSON 才能填入真實工具列表
+- **P1 Windows 真實 opencode**：`spawn('powershell.exe')` 雖平台分流，但在 Node 內 `opencode run --attach` 仍偶發 30s timeout (直接 `opencode` via bash 則 2s 通)，生產 Linux 無此問題，Windows 建議保持 `MOCK_OPENCODE=true` 開發 (已在 README 註明，Linux/Render 為 production target)
+- **P0 無**：`mcp_tools` 已完善並測試，`mcp` 缺 credentials 不 crash 已驗證
 
 ## 8. 執行紀錄
 

@@ -2,7 +2,7 @@ const rateLimit = require('express-rate-limit');
 
 const chatLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 8, // 每 IP 每分鐘 8 次
+    max: 20,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: '請求過於頻繁，請稍後再試 (Rate limited)' }
@@ -10,7 +10,7 @@ const chatLimiter = rateLimit({
 
 const historyLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 60,
+    max: 100,
     standardHeaders: true,
     legacyHeaders: false,
 });

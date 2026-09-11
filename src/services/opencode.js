@@ -27,6 +27,30 @@ async function isServerReachable() {
     }
 }
 
+function parseMcpTools(raw) {
+    if (!raw || typeof raw !== 'string') return [];
+    const tools = new Set();
+    const lines = raw.split('\n');
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+            const obj = JSON.parse(trimmed);
+            if (obj.type === 'tool_use' && obj.part && obj.part.tool) {
+                tools.add(obj.part.tool);
+            } else if (obj.part && obj.part.tool) {
+                tools.add(obj.part.tool);
+            }
+        } catch {}
+    }
+    const re = /\b(github_\w+|gmail_\w+|google[_-]calendar\w*|calendar_\w+|webfetch)\b/gi;
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+        tools.add(m[1].toLowerCase());
+    }
+    return Array.from(tools);
+}
+
 async function run(prompt, opts = {}) {
     if (process.env.MOCK_OPENCODE === 'true') {
         if (process.env.NODE_ENV === 'production') {
@@ -34,7 +58,12 @@ async function run(prompt, opts = {}) {
         } else {
             console.log(`[OpenCode Mock] ${prompt.slice(0,60)}`);
             await new Promise(r => setTimeout(r, 300));
-            return `Hello (mock for: ${prompt.slice(0,100)})`;
+            const lower = prompt.toLowerCase();
+            const mockTools = [];
+            if (lower.includes('github') || lower.includes('repo')) mockTools.push('github_get_file_contents');
+            if (lower.includes('calendar') || lower.includes('行程')) mockTools.push('google-calendar_list_events');
+            if (lower.includes('gmail') || lower.includes('信件') || lower.includes('mail')) mockTools.push('gmail_search');
+            return { result: `Hello (mock for: ${prompt.slice(0,100)})`, mcpTools: mockTools, raw: '' };
         }
     }
     const timeoutMs = opts.timeoutMs || MCP_TIMEOUT_MS;
@@ -85,7 +114,8 @@ async function run(prompt, opts = {}) {
                     settled = true;
                     cleanup();
                     try { child.kill(); } catch {}
-                    resolve(cleanOut);
+                    const raw = stdout + '\n' + stderr;
+                    resolve({ result: cleanOut, mcpTools: parseMcpTools(raw), raw });
                 }, 800);
             }
         };
@@ -98,14 +128,16 @@ async function run(prompt, opts = {}) {
             const outTrim = stdout.trim();
             const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
             const cleanOut = stripAnsi(outTrim).replace(/^>.*$/gm, '').trim();
+            const raw = stdout + '\n' + stderr;
             if (cleanOut) {
-                resolve(cleanOut);
+                resolve({ result: cleanOut, mcpTools: parseMcpTools(raw), raw });
                 return;
             }
             const err = new Error(`OpenCode timeout after ${timeoutMs}ms`);
             err.code = 'TIMEOUT';
             err.stdout = stdout;
             err.stderr = stderr;
+            err.mcpTools = parseMcpTools(raw);
             reject(err);
         }, timeoutMs);
 
@@ -123,6 +155,7 @@ async function run(prompt, opts = {}) {
             cleanup();
             err.stdout = stdout;
             err.stderr = stderr;
+            err.mcpTools = parseMcpTools(stdout + '\n' + stderr);
             reject(err);
         });
 
@@ -135,8 +168,10 @@ async function run(prompt, opts = {}) {
             const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
             const cleanOut = stripAnsi(outTrim).replace(/^>.*$/gm, '').trim();
             const cleanErr = stripAnsi(errTrim).replace(/^>.*$/gm, '').trim();
+            const raw = stdout + '\n' + stderr;
+            const mcpTools = parseMcpTools(raw);
             if (cleanOut) {
-                resolve(cleanOut);
+                resolve({ result: cleanOut, mcpTools, raw });
                 return;
             }
             if (code !== 0) {
@@ -144,13 +179,14 @@ async function run(prompt, opts = {}) {
                 err.code = 'EXIT';
                 err.stdout = stdout;
                 err.stderr = stderr;
+                err.mcpTools = mcpTools;
                 err.exitCode = code;
                 reject(err);
                 return;
             }
-            resolve(cleanErr || '');
+            resolve({ result: cleanErr || '', mcpTools, raw });
         });
     });
 }
 
-module.exports = { run, isServerUrlConfigured, isServerReachable, MCP_TIMEOUT_MS, PROJECT_ROOT };
+module.exports = { run, parseMcpTools, isServerUrlConfigured, isServerReachable, MCP_TIMEOUT_MS, PROJECT_ROOT };

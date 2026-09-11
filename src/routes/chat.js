@@ -45,23 +45,25 @@ router.post('/chat', chatLimiter, async (req, res) => {
     await saveLog({ sessionId, role: 'user', content: prompt, prompt }).catch(()=>{});
 
     try {
-        const result = await opencodeService.run(prompt, { timeoutMs: opencodeService.MCP_TIMEOUT_MS });
+        const runRes = await opencodeService.run(prompt, { timeoutMs: opencodeService.MCP_TIMEOUT_MS });
         if (responded) return;
+        const result = typeof runRes === 'string' ? runRes : runRes.result;
+        const mcpTools = typeof runRes === 'string' ? [] : (Array.isArray(runRes.mcpTools) ? runRes.mcpTools : []);
         const latencyMs = Date.now() - start;
-        // Avoid duplicate write: ensure only one save per AI response
-        await saveLog({ sessionId, role: 'ai', content: result, prompt, latencyMs }).catch(()=>{});
-        safeJson(200, { result, sessionId });
+        await saveLog({ sessionId, role: 'ai', content: result, prompt, mcpTools, latencyMs }).catch(()=>{});
+        safeJson(200, { result, mcpTools, sessionId });
     } catch (err) {
         if (responded) return;
         const isTimeout = err.code === 'TIMEOUT';
         const status = isTimeout ? 504 : 500;
         const details = (err.stderr || err.message || '').slice(0, 2000);
-        // Save error as ai log for history (single write)
-        await saveLog({ sessionId, role: 'ai', content: `ERROR: ${details}`, prompt, latencyMs: Date.now() - start }).catch(()=>{});
+        const mcpTools = Array.isArray(err.mcpTools) ? err.mcpTools : [];
+        await saveLog({ sessionId, role: 'ai', content: `ERROR: ${details}`, prompt, mcpTools, latencyMs: Date.now() - start }).catch(()=>{});
         const errorMsg = isTimeout ? 'OpenCode timeout' : 'OpenCode execution failed';
         safeJson(status, {
             error: errorMsg,
             details,
+            mcpTools,
             hint: 'Check OPENCODE_SERVER_URL and opencode auth (opencode providers list)',
             sessionId
         });
