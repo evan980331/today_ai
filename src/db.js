@@ -34,17 +34,64 @@ async function initDb() {
     }
 }
 
+async function withRetry(fn, retries = 3, baseMs = 200) {
+    let lastErr;
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (e) {
+            lastErr = e;
+            const isRetryable = /503|ECONNRESET|ETIMEDOUT|fetch failed|timeout/i.test(e.message);
+            if (!isRetryable || i === retries - 1) throw e;
+            const delay = baseMs * Math.pow(2, i);
+            console.warn(`[DB] retry ${i + 1}/${retries} after ${delay}ms: ${e.message}`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+    throw lastErr;
+}
+
 async function saveLog({ sessionId = 'default', role, content, prompt = null, mcpTools = null, latencyMs = null }) {
     const s = getSql();
     if (!s) return;
     try {
-        await s`
+        await withRetry(() => s`
             INSERT INTO chat_logs (session_id, role, content, prompt, mcp_tools, latency_ms)
             VALUES (${sessionId}, ${role}, ${content}, ${prompt}, ${mcpTools ? JSON.stringify(mcpTools) : null}::jsonb, ${latencyMs})
-        `;
+        `);
     } catch (e) {
         console.error('[DB] saveLog failed:', e.message);
     }
 }
 
-module.exports = { getSql, initDb, saveLog };
+async function getSessions(limit = 50) {
+    const s = getSql();
+    if (!s) return [];
+    return withRetry(() => s`
+        SELECT 
+            session_id,
+            COUNT(*)::int as msg_count,
+            MAX(created_at) as updated_at,
+            (array_agg(content ORDER BY created_at ASC))[1] as preview,
+            (array_agg(role ORDER BY created_at ASC))[1] as first_role
+        FROM chat_logs 
+        GROUP BY session_id 
+        ORDER BY updated_at DESC 
+        LIMIT ${limit}
+    `);
+}
+
+async function deleteSession(sessionId) {
+    const s = getSql();
+    if (!s) return;
+    return withRetry(() => s`DELETE FROM chat_logs WHERE session_id = ${sessionId}`);
+}
+
+async function ping() {
+    const s = getSql();
+    if (!s) return false;
+    await withRetry(() => s`SELECT 1 as ok`);
+    return true;
+}
+
+module.exports = { getSql, initDb, saveLog, getSessions, deleteSession, ping, withRetry };

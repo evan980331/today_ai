@@ -28,22 +28,24 @@
                 <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white">T</div>
                 <span class="text-lg font-bold tracking-wide">Today AI</span>
             </div>
-            <button onclick="clearChat()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 px-4 rounded-xl flex items-center justify-center space-x-2 transition mb-6 shadow-lg shadow-indigo-600/20">
+            <button onclick="createNewSession()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 px-4 rounded-xl flex items-center justify-center space-x-2 transition mb-4 shadow-lg shadow-indigo-600/20">
                 <i data-lucide="plus" class="w-4 h-4"></i>
                 <span>新對話</span>
             </button>
-            <nav class="space-y-1">
-                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg bg-slate-800 text-indigo-400 font-medium">
-                    <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
-                    <span>工作總覽</span>
+            <div class="flex items-center justify-between px-2 mb-2">
+                <span class="text-xs font-semibold text-slate-400 tracking-wider">歷史對話</span>
+                <span id="session-count" class="text-xs text-slate-500"></span>
+            </div>
+            <div id="session-list" class="space-y-1 overflow-y-auto max-h-[40vh] pr-1 mb-3">
+                <div class="text-xs text-slate-500 px-2 py-2">載入中...</div>
+            </div>
+            <nav class="space-y-1 border-t border-slate-800 pt-3">
+                <div class="text-xs font-semibold text-slate-500 px-2 mb-1">工具</div>
+                <a href="#" class="flex items-center space-x-3 px-3 py-2 rounded-lg text-slate-400 hover:bg-slate-800/50 text-xs">
+                    <i data-lucide="github" class="w-3.5 h-3.5"></i><span>GitHub MCP</span>
                 </a>
-                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition">
-                    <i data-lucide="github" class="w-4 h-4"></i>
-                    <span>GitHub 專案</span>
-                </a>
-                <a href="#" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition">
-                    <i data-lucide="calendar" class="w-4 h-4"></i>
-                    <span>行事曆 & 郵件</span>
+                <a href="#" class="flex items-center space-x-3 px-3 py-2 rounded-lg text-slate-400 hover:bg-slate-800/50 text-xs">
+                    <i data-lucide="calendar" class="w-3.5 h-3.5"></i><span>Calendar & Gmail</span>
                 </a>
             </nav>
         </div>
@@ -116,9 +118,13 @@
             year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
         });
 
+        let currentSessionId = localStorage.getItem('todayai_session') || crypto.randomUUID();
+        localStorage.setItem('todayai_session', currentSessionId);
+
         const input = document.getElementById('user-input');
         const messagesDiv = document.getElementById('messages');
         const welcomeSection = document.getElementById('welcome-section');
+        const sessionListEl = document.getElementById('session-list');
 
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -146,7 +152,7 @@
                 const res = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt: text })
+                    body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
                 });
 
                 const data = await res.json();
@@ -154,6 +160,11 @@
 
                 if (data.result) {
                     appendMessage('ai', data.result);
+                    if (data.sessionId && data.sessionId !== currentSessionId) {
+                        currentSessionId = data.sessionId;
+                        localStorage.setItem('todayai_session', currentSessionId);
+                    }
+                    loadSessions();
                 } else {
                     appendMessage('ai', '執行失敗或出錯：' + (data.error || '無回應'));
                 }
@@ -201,22 +212,68 @@
         }
 
         async function loadHistory() {
+            messagesDiv.innerHTML = '';
             try {
-                const res = await fetch('/api/history?limit=100');
+                const res = await fetch(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}&limit=100`);
                 const rows = await res.json();
                 if (Array.isArray(rows) && rows.length > 0) {
                     welcomeSection.classList.add('hidden');
                     rows.forEach(r => appendMessage(r.role === 'user' ? 'user' : 'ai', r.content));
+                } else {
+                    welcomeSection.classList.remove('hidden');
                 }
             } catch(e) { console.warn('history load failed', e); }
         }
-        loadHistory();
 
-        async function clearChat() {
+        async function loadSessions() {
+            try {
+                const res = await fetch('/api/sessions?limit=50');
+                const sessions = await res.json();
+                document.getElementById('session-count').textContent = sessions.length ? `${sessions.length} 則` : '';
+                if (!Array.isArray(sessions) || sessions.length === 0) {
+                    sessionListEl.innerHTML = '<div class="text-xs text-slate-500 px-2 py-2">尚無對話</div>';
+                    return;
+                }
+                sessionListEl.innerHTML = sessions.map(s => {
+                    const isActive = s.session_id === currentSessionId;
+                    const preview = (s.preview || '(空對話)').slice(0,28).replace(/</g,'&lt;');
+                    const date = new Date(s.updated_at).toLocaleDateString('zh-TW', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
+                    return `<div onclick="switchSession('${s.session_id}')" class="group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition ${isActive ? 'bg-slate-800 text-indigo-300 border border-slate-700' : 'hover:bg-slate-800/60 text-slate-400 hover:text-slate-200'}">
+                        <div class="flex-1 min-w-0 text-left">
+                            <div class="text-xs font-medium truncate">${preview}</div>
+                            <div class="text-[10px] opacity-60 truncate">${s.msg_count} 則 · ${date}</div>
+                        </div>
+                        <button onclick="event.stopPropagation(); deleteSession('${s.session_id}')" class="opacity-0 group-hover:opacity-100 ml-2 p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400 transition" title="刪除"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                    </div>`;
+                }).join('');
+                lucide.createIcons();
+            } catch(e) { sessionListEl.innerHTML = '<div class="text-xs text-red-400 px-2">載入失敗</div>'; }
+        }
+
+        function switchSession(id) {
+            currentSessionId = id;
+            localStorage.setItem('todayai_session', id);
+            loadHistory();
+            loadSessions();
+        }
+        function createNewSession() {
+            currentSessionId = crypto.randomUUID();
+            localStorage.setItem('todayai_session', currentSessionId);
             messagesDiv.innerHTML = '';
             welcomeSection.classList.remove('hidden');
-            try { await fetch('/api/history?sessionId=default', { method: 'DELETE' }); } catch(e) {}
+            loadSessions();
         }
+        async function deleteSession(id) {
+            if (!confirm('確定刪除此對話？')) return;
+            await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            if (id === currentSessionId) createNewSession();
+            else loadSessions();
+        }
+        // 保留舊 clearChat 相容
+        function clearChat(){ createNewSession(); }
+
+        loadHistory();
+        loadSessions();
 
         function scrollToBottom() {
             const container = document.getElementById('chat-container');
