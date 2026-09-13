@@ -11,8 +11,27 @@ services:
         value: production
       - key: PORT
         value: 10000
+      # OpenCode runtime: this service does NOT bundle an OpenCode Server.
+      # Point at an external Agent Worker / OpenCode Server, or leave empty
+      # (API stays up; /api/chat* returns explicit 503 runtime-unavailable).
       - key: OPENCODE_SERVER_URL
-        value: http://localhost:4096
+        sync: false
+      - key: OPENCODE_SERVER_USERNAME
+        sync: false
+      - key: OPENCODE_SERVER_PASSWORD
+        sync: false
+      - key: WORKSPACE_ROOT
+        value: /tmp/today-ai-workspaces
+      - key: WORKER_URL
+        sync: false
+      - key: WORKER_SHARED_SECRET
+        sync: false
+      - key: AUTH_USERNAME
+        sync: false
+      - key: AUTH_PASSWORD
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: GITHUB_PERSONAL_ACCESS_TOKEN

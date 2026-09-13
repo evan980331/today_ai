@@ -8,6 +8,7 @@ const { validateEnv } = require('./middleware/validateEnv');
 const { initDb } = require('./db/db');
 const healthRouter = require('./routes/health');
 const chatRouter = require('./routes/chat');
+const streamRouter = require('./routes/stream');
 const sessionsRouter = require('./routes/sessions');
 const { authMiddleware, loginHandler, logoutHandler, meHandler } = require('./middleware/auth');
 const { loginLimiter } = require('./middleware/rateLimit');
@@ -60,6 +61,7 @@ app.post('/api/auth/logout', logoutHandler);
 app.use('/api', authMiddleware);
 app.get('/api/auth/me', meHandler);
 app.use('/api', chatRouter);
+app.use('/api', streamRouter);
 app.use('/api', sessionsRouter);
 
 // Consistent error handler

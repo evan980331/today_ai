@@ -1,4 +1,103 @@
-# Today AI 架構重構完成報告 (2026-09-11)
+# Today AI P0.9 報告 (2026-09-12, Remote stream 打通)
+
+> `/api/chat/stream` 經同一 `useRemoteWorker()` 切遠端分支：
+> Worker 端新增 `POST /workers/:id/execute/stream`（`upstream`／`done`／`error`
+> SSE），`RemoteWorkerClient.executeStream()`（超時／Abort／畸形跳過／狀態映射），
+> Today AI 以既有 `normalizeServerEvent` 轉換——瀏覽器事件與本機逐字相同，
+> workerId／URL／secret 零外洩。修了一個真缺陷：`req.on('close')` 會在
+> request body 收完即觸發，不能當 disconnect 訊號，兩條 SSE route 一律改用
+> `res.on('close') ＋ !writableEnded`。另加 `WORKER_REQUEST_TIMEOUT_MS`。
+> Docker／Linux 真機／Cloud／手機 E2E 在本機皆不可用，一律 SKIPPED。
+> 測試：166/166（fresh server 連跑兩次穩定）。未 commit，未 push。
+
+# 以下為上一輪報告（P0.8）
+
+# Today AI P0.8 報告 (2026-09-12, Deployment Readiness 稽核)
+
+> 半配置遠端 Worker（僅 `WORKER_URL` 或僅 `WORKER_SHARED_SECRET`）在
+> production 直接啟動失敗（dev 警告＋本機 fallback）；`.env.example`
+> `WORKSPACE_ROOT` 重複定義已合併；環境變數稽核表見
+> `docs/cloud-architecture.md`（REQUIRED／OPTIONAL／DEVELOPMENT ONLY）。
+> Docker／Linux 真機／雲端部署在本機皆不可用：build、smoke、Linux 整合、
+> Cloud E2E、手機 E2E 全部誠實 SKIPPED，無 fake pass。
+> 測試：154/154（fresh server 連跑兩次穩定）。未 push。
+
+# 以下為上一輪報告（P0.7）
+
+# Today AI P0.7 報告 (2026-09-12, Remote Worker 合約＋部署基礎)
+
+> `/api/chat` 已經 `executePrompt()` 改走 Worker provider（本機 `withWorker`；
+> `WORKER_URL`＋`WORKER_SHARED_SECRET` 同時存在才改走遠端；stream 維持本機）。
+> 新增：`workerProvider.js`、`remoteWorker.js`、`routes/workers.js`、
+> `workerServer.js` 獨立 entry、`validateWorkerEnv.js`、`scripts/`（CI 修補
+> live-server 啟動）、`test/worker-remote.test.js`（13）、
+> `test/integration-cloud-worker.test.js`（opt-in E2E 合約）。
+> `MAX_WORKERS` 已強制執行；`MAX_WORKSPACE_SIZE_MB` 誠實標示未強制。
+> Docker／Linux 真機在本機不可用：build／smoke／CI 執行皆為 SKIPPED（已明示，
+> 無 fake pass）；`worker-smoke.sh` 僅通過 `bash -n` 語法檢查。
+> 測試：150/150（fresh server 連跑兩次穩定）。未 push。
+
+# 以下為上一輪報告（P0-1 ~ P0-9）
+
+# Today AI 雲端平台化報告 (2026-09-12, P0-1 ~ P0-9)
+
+> 上一輪「Render/Linux production ready」的說法**已撤回**：經查 `render.yaml`
+> 的 `startCommand` 只有 `npm start`，production 根本沒有 OpenCode Server
+> process，`OPENCODE_SERVER_URL=http://localhost:4096` 是錯誤假設。本輪把
+> 架構改成「Today AI API → 外部 Agent Worker / OpenCode Server」，並讓所有
+> 缺 runtime 的情況明確失敗（503），不再假裝成功。詳見 `docs/cloud-architecture.md`。
+
+## 本輪完成
+
+- **P0-1 Runtime 三態**：`getRuntimeMode()` → `mock/local-cli/remote-server/
+  unavailable`；production `MOCK_OPENCODE=true` 直接啟動失敗；
+  production 無 runtime 時 `run()`/`runStream()` 丟 `RUNTIME_UNAVAILABLE`
+ （chat/stream 明確回 503）。未把 binary 硬塞進 package.json。
+- **P0-2 Workspace**：`src/services/workspace.js`（`WORKSPACE_ROOT` 驅動，
+  ID 驗證＋traversal 保護，零硬編碼路徑）。
+- **P0-3 Session**：`agent_sessions` migration（`created/running/completed/
+  failed/cancelled`，owner 暫用登入 username）；`chat_logs` 零更動。
+- **P0-4 OpenCodeClient**：`health/createSession/sendPrompt/subscribeEvents/
+  abortSession`；CLI transport 完整（含 `--format json` 真實事件）；
+  server transport 僅 `health()`，其餘明確 `NOT_IMPLEMENTED`（官方 endpoint
+  未確認，不假造）。
+- **P0-5 Streaming**：`POST /api/chat/stream`（SSE，Cookie Auth，
+  `POST /api/chat` 保留）；adapter 正規化（raw 不暴露）；完成才寫一次
+  history；disconnect 觸發 Abort 清理。前端增量顯示＋legacy fallback。
+  注意：`--format json` 的 text 是 per-step 整塊，非 token 級。
+- **P0-6 Git**：`src/services/git.js`（execFile＋參數陣列，URL／ref 驗證，
+  workspace-scoped，traversal 保護）。未接 OAuth。
+- **P0-7 Deploy**：`render.yaml` 移除 `localhost:4096` 假設，新增
+  `WORKSPACE_ROOT`／`OPENCODE_SERVER_*`／`AUTH_*`／`ALLOWED_ORIGINS`
+  （secret 類 `sync:false`）；`.env.example` 重寫 runtime 說明；
+  `validateEnv` production 必填加 `WORKSPACE_ROOT`，MOCK 在 production
+  直接 exit(1)。
+- **P0-8 Tests**：`test/cloud.test.js` 新增 46 測試（workspace 隔離／traversal、
+  session schema、runtime unavailable、MOCK 禁令、server health 失敗、
+  event 正規化、git 參數安全、SSE headers／done／error／abort）。
+- **P0-9 Docs**：本節＋`docs/cloud-architecture.md`（完成／未完成／下一個 P0/P1）。
+
+## 本輪測試
+
+```bash
+npm test
+# tests 106, pass 106, fail 0（fresh server 連跑兩次皆穩定）
+# 既有 60 個測試零修改通過（僅 auth.test.js 的 validateEnv baseProd 補
+# WORKSPACE_ROOT／清 MOCK 以符合新 production 要求；rate-limit 測試改為
+# 不耗盡共享 budget＋隔離式 429 驗證，見下）
+```
+
+測試穩定性修正：全 test 檔共用一個 server（login limiter 10/15min），
+`cloud.test.js` 的 stream 測試改為 in-process 自起 app（獨立 limiter 實例），
+不再與 `auth.test.js` 搶登入 budget。
+
+## 已知限制／下一個 P0
+
+見 `docs/cloud-architecture.md`「目前未完成／下一個 P0」。
+
+---
+
+# 以下為上一輪報告（2026-09-11，production-ready 聲明已撤回）
 
 > 核心目標：將 Windows PowerShell → opencode CLI 依賴重構成可部署、可抽換、可維護的 OpenCode Service 架構，零功能退化，Linux/Render 可直接部署。
 

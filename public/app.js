@@ -108,6 +108,8 @@ function usePrompt(text) {
 }
 window.usePrompt = usePrompt;
 
+let currentStreamController = null;
+
 async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
@@ -120,8 +122,106 @@ async function sendMessage() {
     appendMessage('user', text);
     input.value = '';
 
-    const loadingId = appendLoading();
+    // Abort any previous in-flight stream before starting a new one.
+    if (currentStreamController) {
+        try { currentStreamController.abort(); } catch {}
+        currentStreamController = null;
+    }
 
+    const loadingId = appendLoading();
+    const streamed = await sendMessageStream(text, loadingId);
+    if (streamed) return;
+    // Fallback: legacy non-streaming endpoint (kept for compatibility).
+    await sendMessageLegacy(text, loadingId);
+}
+
+// Streaming path: POST /api/chat/stream (SSE). Returns true when the
+// stream endpoint handled the request (success or clean error).
+async function sendMessageStream(text, loadingId) {
+    const controller = new AbortController();
+    currentStreamController = controller;
+    let bubble = null;
+    let fullText = '';
+    let handled = false;
+    try {
+        const res = await fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            signal: controller.signal,
+            body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
+        });
+        if (res.status === 401) {
+            removeLoading(loadingId);
+            loginOverlay.classList.remove('hidden');
+            appendMessage('ai', '未授權 (401)：請先登入');
+            return true;
+        }
+        const ctype = res.headers.get('content-type') || '';
+        if (!res.ok || !ctype.includes('text/event-stream') || !res.body) {
+            return false; // let legacy path handle it
+        }
+        handled = true;
+        removeLoading(loadingId);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        const flushEvents = () => {
+            const parts = buf.split('\n\n');
+            buf = parts.pop();
+            for (const part of parts) {
+                let ev = 'message';
+                let data = '';
+                for (const line of part.split('\n')) {
+                    if (line.startsWith('event:')) ev = line.slice(6).trim();
+                    else if (line.startsWith('data:')) data += line.slice(5).trim();
+                }
+                if (!data) continue;
+                let obj;
+                try { obj = JSON.parse(data); } catch { continue; }
+                if (ev === 'text.delta' && obj.content) {
+                    fullText += obj.content;
+                    if (!bubble) bubble = appendStreamingMessage();
+                    bubble.textContent = fullText;
+                    scrollToBottom();
+                } else if (ev === 'message.completed' || ev === 'done') {
+                    if (!bubble && fullText) bubble = appendStreamingMessage();
+                    if (bubble) bubble.textContent = fullText || bubble.textContent;
+                    loadSessions();
+                } else if (ev === 'error') {
+                    if (!bubble) bubble = appendStreamingMessage();
+                    bubble.textContent = `錯誤：${obj.message || '未知錯誤'}`;
+                }
+            }
+        };
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            flushEvents();
+        }
+        buf += decoder.decode();
+        flushEvents();
+        if (!bubble && !fullText) {
+            appendMessage('ai', '執行完成，但沒有收到回應內容。');
+        }
+        return true;
+    } catch (err) {
+        if (err && err.name === 'AbortError') {
+            removeLoading(loadingId);
+            appendMessage('ai', '已取消生成。');
+            return true;
+        }
+        if (!handled) return false; // network-level failure: try legacy path
+        removeLoading(loadingId);
+        if (!bubble) appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。');
+        return true;
+    } finally {
+        if (currentStreamController === controller) currentStreamController = null;
+    }
+}
+
+async function sendMessageLegacy(text, loadingId) {
     try {
         const res = await fetch('/api/chat', {
             method: 'POST',
@@ -140,6 +240,7 @@ async function sendMessage() {
             let msg = `錯誤 ${res.status}: ${escapeHtml(data.error || '未知錯誤')}`;
             if (res.status === 429) msg = '請求過於頻繁 (429)：請稍後再試';
             else if (res.status === 504) msg = 'OpenCode 超時 (504)：請稍後重試';
+            else if (res.status === 503) msg = 'OpenCode runtime 暫時不可用 (503)：請稍後重試';
             else if (res.status === 500) msg = `執行失敗 (500)：${escapeHtml((data.details || data.error || '').slice(0,300))}`;
             else if (data.details) msg += `\n${escapeHtml(data.details.slice(0,300))}`;
             appendMessage('ai', msg);
@@ -165,6 +266,24 @@ async function sendMessage() {
     }
 }
 window.sendMessage = sendMessage;
+
+// Streaming AI bubble: same styling as appendMessage('ai'), but returns the
+// text node so chunks can update it incrementally (textContent = XSS-safe).
+function appendStreamingMessage() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex space-x-3 justify-start';
+    const icon = document.createElement('div');
+    icon.className = 'w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1';
+    icon.textContent = 'T';
+    const bubble = document.createElement('div');
+    bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-xl leading-relaxed shadow-md whitespace-pre-wrap';
+    bubble.textContent = '';
+    wrapper.appendChild(icon);
+    wrapper.appendChild(bubble);
+    messagesDiv.appendChild(wrapper);
+    scrollToBottom();
+    return bubble;
+}
 
 function appendMessage(role, content) {
     const wrapper = document.createElement('div');

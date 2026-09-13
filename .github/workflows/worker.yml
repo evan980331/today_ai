@@ -1,0 +1,65 @@
+# P0.6-11: Agent Worker verification on Linux.
+# Scope is deliberately narrow: install toolchain, run unit suite,
+# then the real worker integration test. No deployment here.
+# If OpenCode cannot install or run in CI, jobs FAIL loudly (no fake pass).
+name: worker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AUTH_USERNAME: ci-test-user
+      AUTH_PASSWORD: ci-test-password-please-change
+      MOCK_OPENCODE: "true"
+      DATABASE_URL: ${{ secrets.NEON_TEST_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm install
+
+      - name: Install OpenCode CLI
+        run: |
+          npm install -g opencode-ai
+          opencode --version
+          git --version
+
+      - name: Unit + API tests (mock runtime)
+        # Integration suites talk to a live server (TEST_BASE_URL or
+        # localhost:3001), so boot it first. If the server fails to come
+        # up, the job FAILS here instead of producing confusing ECONNREFUSED.
+        run: |
+          node src/server.js &
+          SERVER_PID=$!
+          echo "SERVER_PID=${SERVER_PID}" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3001/api/health >/dev/null 2>&1; then
+              echo "server up"
+              break
+            fi
+            if [ "$i" = "30" ]; then echo "server failed to start" >&2; exit 1; fi
+            sleep 1
+          done
+          npm test
+          kill "$SERVER_PID"
+
+      - name: Real worker integration test
+        # Needs: DATABASE_URL (Neon) + real `opencode serve` + a working
+        # model provider login on the runner (else the prompt step FAILS
+        # loudly — by design, never fake-pass). Provide provider credentials
+        # via secrets (exact vars depend on the configured provider).
+        # Without the flag the file SKIPS explicitly, never fake-passes.
+        if: env.DATABASE_URL != ''
+        run: OPENCODE_WORKER_INTEGRATION_TEST=true node --test test/integration-worker.test.js
+        env:
+          OPENCODE_WORKER_INTEGRATION_TEST: "true"

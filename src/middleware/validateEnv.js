@@ -4,6 +4,8 @@ function validateEnv() {
     if (isProd) {
         required.push('AUTH_USERNAME', 'AUTH_PASSWORD', 'ALLOWED_ORIGINS');
     }
+    // WORKSPACE_ROOT is Worker-only: Vercel API uses workspace.js fallback
+    // (os.tmpdir()/today-ai-workspaces) and must not fail cold start without it.
 
     const missing = required.filter(k => !process.env[k] || !process.env[k].trim());
     if (missing.length) {
@@ -48,7 +50,26 @@ function validateEnv() {
         console.log('[ENV] OPENCODE_SERVER_URL not set, using direct opencode run');
     }
     if (process.env.MOCK_OPENCODE === 'true' && isProd) {
-        console.warn('[ENV] WARNING: MOCK_OPENCODE=true in production - mock will be disabled');
+        console.error('[ENV] MOCK_OPENCODE=true is forbidden in production');
+        process.exit(1);
+    }
+    // P0.8-4: remote worker must be fully configured or not at all.
+    // Half configuration (URL without secret or vice versa) fails loudly in
+    // production — never fall back to an insecure or wrong worker silently.
+    // Development keeps local fallback with a warning.
+    const hasWorkerUrl = !!(process.env.WORKER_URL && process.env.WORKER_URL.trim());
+    const hasWorkerSecret = !!(process.env.WORKER_SHARED_SECRET && process.env.WORKER_SHARED_SECRET.trim());
+    if (hasWorkerUrl !== hasWorkerSecret) {
+        if (isProd) {
+            console.error('[ENV] WORKER_URL and WORKER_SHARED_SECRET must both be set (or both unset) in production');
+            process.exit(1);
+        }
+        console.warn('[ENV] WORKER_URL/WORKER_SHARED_SECRET half-configured: remote worker disabled, using local execution');
+    } else if (isProd && hasWorkerUrl) {
+        console.log('[ENV] remote Agent Worker mode enabled');
+    }
+    if (isProd && !process.env.OPENCODE_SERVER_URL) {
+        console.warn('[ENV] OPENCODE_SERVER_URL not set: OpenCode runtime unavailable in production (chat returns explicit 503)');
     }
     if (!isProd && (!process.env.AUTH_USERNAME || !process.env.AUTH_PASSWORD)) {
         console.warn('[ENV] AUTH_USERNAME/PASSWORD not set (auth will allow all in dev)');

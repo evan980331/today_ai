@@ -1,0 +1,38 @@
+# P0.5: Agent Worker prototype image (single-host building block).
+#
+# Purpose: prove an OpenCode-capable worker runs on Linux with only
+# Node.js + git + OpenCode CLI. The Today AI API service does NOT run
+# agents itself; it spawns/manages one `opencode serve` per workspace
+# (see src/services/agentWorker.js).
+#
+# Build (needs Docker; NOT verified in Windows dev env):
+#   docker build -f Dockerfile.worker -t today-ai-worker:proto .
+# Run smoke:
+#   docker run --rm today-ai-worker:proto
+#
+# Secrets (GitHub tokens, OPENCODE_SERVER_PASSWORD, provider keys) are
+# NEVER baked in. They arrive at runtime via environment / Today AI spawn env.
+FROM node:20-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenCode CLI via the official npm distribution (same channel as
+# Today AI local dev: npm i -g opencode-ai). Installs the Linux binary
+# through the package postinstall step.
+RUN npm install -g opencode-ai \
+    && opencode --version \
+    && git --version \
+    && node --version
+
+# Isolated workspaces live here at runtime (mounted or ephemeral).
+RUN mkdir -p /workspace
+ENV WORKSPACE_ROOT=/workspace
+
+WORKDIR /srv
+
+# Smoke check: toolchain present, no secrets required.
+CMD ["sh", "-c", "node --version && git --version && opencode --version && echo WORKER_IMAGE_OK"]

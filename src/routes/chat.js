@@ -1,9 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const { chatLimiter } = require('../middleware/rateLimit');
-const { saveLog } = require('../db/db');
+const { saveLog, createAgentSession, updateAgentSessionStatus } = require('../db/db');
 const { validateSessionId } = require('../services/session');
-const opencodeService = require('../services/opencode');
+const { tryAcquire, release } = require('../services/executionLock');
+const orchestrator = require('../services/agentOrchestrator');
+const { DEFAULT_TIMEOUT_MS } = require('../services/opencodeRuntime');
 
 const router = express.Router();
 
@@ -32,6 +34,14 @@ router.post('/chat', chatLimiter, async (req, res) => {
         }
     }
 
+    // P0-6: one active agent execution per chat session (409 otherwise).
+    let lockToken = null;
+    try {
+        lockToken = tryAcquire(sessionId, { owner: (req.user && req.user.username) || 'unknown' });
+    } catch (e) {
+        return sendError(res, e.status || 409, e.message, undefined, sessionId);
+    }
+
     // Enforce single response
     let responded = false;
     const safeJson = (code, payload) => {
@@ -41,25 +51,43 @@ router.post('/chat', chatLimiter, async (req, res) => {
     };
 
     const start = Date.now();
-    // Save user message (fire-and-forget, but await to ensure order; swallow DB errors)
-    await saveLog({ sessionId, role: 'user', content: prompt, prompt }).catch(()=>{});
-
+    const owner = (req.user && req.user.username) || 'unknown';
+    const agentSessionId = crypto.randomUUID();
     try {
-        const runRes = await opencodeService.run(prompt, { timeoutMs: opencodeService.MCP_TIMEOUT_MS });
+        // Save user message (await to ensure order; swallow DB errors)
+        await saveLog({ sessionId, role: 'user', content: prompt, prompt }).catch(() => {});
+        await createAgentSession({ id: agentSessionId, owner, workspaceId: sessionId }).catch(() => {});
+        await updateAgentSessionStatus(agentSessionId, 'running').catch(() => {});
+
+        // Execution goes through the agent orchestrator (task + runtime
+        // selection); the route knows nothing about OpenCode specifics.
+        // Response contract unchanged: { result, mcpTools, sessionId }.
+        const task = orchestrator.createTask({
+            prompt,
+            sessionId,
+            owner,
+            runtime: 'opencode'
+        });
+        const runRes = await orchestrator.runTask(task.id, {
+            timeoutMs: DEFAULT_TIMEOUT_MS
+        });
         if (responded) return;
         const result = typeof runRes === 'string' ? runRes : runRes.result;
         const mcpTools = typeof runRes === 'string' ? [] : (Array.isArray(runRes.mcpTools) ? runRes.mcpTools : []);
         const latencyMs = Date.now() - start;
         await saveLog({ sessionId, role: 'ai', content: result, prompt, mcpTools, latencyMs }).catch(()=>{});
+        await updateAgentSessionStatus(agentSessionId, 'completed').catch(() => {});
         safeJson(200, { result, mcpTools, sessionId });
     } catch (err) {
         if (responded) return;
         const isTimeout = err.code === 'TIMEOUT';
-        const status = isTimeout ? 504 : 500;
+        const isUnavailable = err.code === 'RUNTIME_UNAVAILABLE' || err.code === 'MOCK_FORBIDDEN';
+        const status = isTimeout ? 504 : isUnavailable ? 503 : 500;
         const details = (err.stderr || err.message || '').slice(0, 2000);
         const mcpTools = Array.isArray(err.mcpTools) ? err.mcpTools : [];
         await saveLog({ sessionId, role: 'ai', content: `ERROR: ${details}`, prompt, mcpTools, latencyMs: Date.now() - start }).catch(()=>{});
-        const errorMsg = isTimeout ? 'OpenCode timeout' : 'OpenCode execution failed';
+        await updateAgentSessionStatus(agentSessionId, 'failed').catch(() => {});
+        const errorMsg = isTimeout ? 'OpenCode timeout' : isUnavailable ? 'OpenCode runtime unavailable' : 'OpenCode execution failed';
         safeJson(status, {
             error: errorMsg,
             details,
@@ -67,6 +95,8 @@ router.post('/chat', chatLimiter, async (req, res) => {
             hint: 'Check OPENCODE_SERVER_URL and opencode auth (opencode providers list)',
             sessionId
         });
+    } finally {
+        release(lockToken);
     }
 });
 
