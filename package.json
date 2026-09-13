@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "build": "node scripts/build-check.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "auth:setup": "node scripts/auth-setup.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

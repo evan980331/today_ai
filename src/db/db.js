@@ -62,6 +62,18 @@ async function initDb() {
         `;
         await s`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions (expires_at)`;
         console.log('[DB] auth_sessions table ready');
+        // Auth users: credentials moved from env to DB (hashed passwords only).
+        await s`
+            CREATE TABLE IF NOT EXISTS auth_users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        `;
+        await s`CREATE INDEX IF NOT EXISTS idx_auth_users_username ON auth_users (username)`;
+        console.log('[DB] auth_users table ready');
     } catch (e) {
         console.error('[DB] init failed:', e.message);
         // Do not crash server on DB failure
@@ -247,9 +259,66 @@ async function deleteAuthSession(tokenHash) {
     await withRetry(() => s`DELETE FROM auth_sessions WHERE token_hash = ${tokenHash}`);
 }
 
+async function findAuthUserByUsername(username) {
+    const s = getSql();
+    if (!s) return null;
+    if (!username || typeof username !== 'string') return null;
+    const rows = await withRetry(() => s`
+        SELECT id, username, password_hash AS "passwordHash",
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM auth_users WHERE username = ${username}
+    `);
+    return rows[0] || null;
+}
+
+async function createAuthUser({ id, username, passwordHash }) {
+    const s = getSql();
+    if (!s) throw new Error('DATABASE_URL not configured');
+    if (!username || typeof username !== 'string' || username.length > 256) throw new Error('Invalid username');
+    if (!passwordHash || typeof passwordHash !== 'string') throw new Error('Invalid password hash');
+    const uid = id || username;
+    const rows = await withRetry(() => s`
+        INSERT INTO auth_users (id, username, password_hash)
+        VALUES (${uid}, ${username}, ${passwordHash})
+        ON CONFLICT (username) DO NOTHING
+        RETURNING id, username, password_hash AS "passwordHash",
+                  created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+async function upsertAuthUser({ username, passwordHash }) {
+    const s = getSql();
+    if (!s) throw new Error('DATABASE_URL not configured');
+    if (!username || typeof username !== 'string' || username.length > 256) throw new Error('Invalid username');
+    if (!passwordHash || typeof passwordHash !== 'string') throw new Error('Invalid password hash');
+    const rows = await withRetry(() => s`
+        INSERT INTO auth_users (id, username, password_hash, updated_at)
+        VALUES (${username}, ${username}, ${passwordHash}, NOW())
+        ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW()
+        RETURNING id, username, password_hash AS "passwordHash",
+                  created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+async function countAuthUsers() {
+    const s = getSql();
+    if (!s) return 0;
+    const rows = await withRetry(() => s`SELECT COUNT(*)::int AS count FROM auth_users`);
+    return rows[0] ? rows[0].count : 0;
+}
+
+async function deleteAuthUser(username) {
+    const s = getSql();
+    if (!s) return;
+    await withRetry(() => s`DELETE FROM auth_users WHERE username = ${username}`);
+}
+
 module.exports = {
     getSql, initDb, saveLog, getSessions, getHistory, deleteSession, ping, withRetry,
     AGENT_STATUS, createAgentSession, getAgentSession, updateAgentSessionStatus,
     listAgentSessions, deleteAgentSession,
-    saveAuthSession, findAuthSession, deleteAuthSession
+    saveAuthSession, findAuthSession, deleteAuthSession,
+    findAuthUserByUsername, createAuthUser, upsertAuthUser, countAuthUsers, deleteAuthUser
 };

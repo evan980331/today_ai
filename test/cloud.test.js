@@ -173,11 +173,11 @@ describe('P0-7 validateEnv ALLOWED_ORIGINS edge cases', () => {
     const baseProd = {
         NODE_ENV: 'production',
         DATABASE_URL: 'postgresql://test:test@localhost/test',
-        AUTH_USERNAME: 'admin',
-        AUTH_PASSWORD: 'secret',
-        WORKSPACE_ROOT: '/tmp/today-ai-test-workspaces',
-        MOCK_OPENCODE: undefined, // must not leak dev mock flag into prod validation
-        OPENCODE_SERVER_URL: undefined
+        ALLOWED_ORIGINS: 'https://a.com',
+        MOCK_OPENCODE: undefined,
+        OPENCODE_SERVER_URL: undefined,
+        WORKER_URL: undefined,
+        WORKER_SHARED_SECRET: undefined
     };
 
     async function exitsWith(overrides) {

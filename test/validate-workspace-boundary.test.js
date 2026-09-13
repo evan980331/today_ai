@@ -56,9 +56,9 @@ describe('validateEnv WORKSPACE_ROOT is optional on Vercel API', () => {
         assert.equal(await withEnv({ ...baseProd, DATABASE_URL: undefined }, () => exitsWith(() => validateEnv())), true);
     });
 
-    it('production without AUTH_USERNAME/AUTH_PASSWORD/ALLOWED_ORIGINS still fails', async () => {
-        assert.equal(await withEnv({ ...baseProd, AUTH_USERNAME: undefined }, () => exitsWith(() => validateEnv())), true);
-        assert.equal(await withEnv({ ...baseProd, AUTH_PASSWORD: undefined }, () => exitsWith(() => validateEnv())), true);
+    it('production without AUTH_USERNAME/AUTH_PASSWORD does NOT fail (now DB-backed), ALLOWED_ORIGINS still fails', async () => {
+        assert.equal(await withEnv({ ...baseProd, AUTH_USERNAME: undefined }, () => exitsWith(() => validateEnv())), false);
+        assert.equal(await withEnv({ ...baseProd, AUTH_PASSWORD: undefined }, () => exitsWith(() => validateEnv())), false);
         assert.equal(await withEnv({ ...baseProd, ALLOWED_ORIGINS: undefined }, () => exitsWith(() => validateEnv())), true);
     });
 

@@ -2,10 +2,11 @@ function validateEnv() {
     const isProd = process.env.NODE_ENV === 'production';
     const required = ['DATABASE_URL'];
     if (isProd) {
-        required.push('AUTH_USERNAME', 'AUTH_PASSWORD', 'ALLOWED_ORIGINS');
+        required.push('ALLOWED_ORIGINS');
     }
-    // WORKSPACE_ROOT is Worker-only: Vercel API uses workspace.js fallback
-    // (os.tmpdir()/today-ai-workspaces) and must not fail cold start without it.
+    // AUTH_USERNAME/AUTH_PASSWORD are no longer required: credentials live in
+    // Neon auth_users (hashed). Use `npm run auth:setup` with those env vars
+    // once to initialize. WORKSPACE_ROOT is Worker-only (workspace.js fallback).
 
     const missing = required.filter(k => !process.env[k] || !process.env[k].trim());
     if (missing.length) {
@@ -71,8 +72,8 @@ function validateEnv() {
     if (isProd && !process.env.OPENCODE_SERVER_URL) {
         console.warn('[ENV] OPENCODE_SERVER_URL not set: OpenCode runtime unavailable in production (chat returns explicit 503)');
     }
-    if (!isProd && (!process.env.AUTH_USERNAME || !process.env.AUTH_PASSWORD)) {
-        console.warn('[ENV] AUTH_USERNAME/PASSWORD not set (auth will allow all in dev)');
+    if (!isProd && !process.env.DATABASE_URL) {
+        console.warn('[ENV] DATABASE_URL not set (auth will allow all in dev without DB)');
     }
 
     // Never log secrets

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { getSql, saveAuthSession, findAuthSession, deleteAuthSession } = require('../db/db');
+const { getSql, saveAuthSession, findAuthSession, deleteAuthSession, findAuthUserByUsername } = require('../db/db');
+const { verifyPassword } = require('../services/password');
 
 // Session store: fast in-process Map (write-through) + shared Postgres
 // table (auth_sessions) so a session created on one instance (e.g. Vercel
@@ -13,27 +14,12 @@ function tokenHash(token) {
     return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-function getEnvCredentials() {
-    return {
-        username: process.env.AUTH_USERNAME || '',
-        password: process.env.AUTH_PASSWORD || ''
-    };
-}
-
 function isAuthConfigured() {
-    const { username, password } = getEnvCredentials();
-    return !!username && !!password;
-}
-
-function timingSafeEqualString(a, b) {
-    const bufA = Buffer.from(a || '');
-    const bufB = Buffer.from(b || '');
-    if (bufA.length !== bufB.length) return false;
-    try {
-        return crypto.timingSafeEqual(bufA, bufB);
-    } catch {
-        return false;
-    }
+    // Auth is now DB-backed (auth_users). If DATABASE_URL is present, auth is
+    // considered configured; login will query the table. Without DB (dev without
+    // DATABASE_URL), fall back to allow-all in non-production for local dev parity.
+    if (getSql()) return true;
+    return false;
 }
 
 async function createSession(username) {
@@ -165,14 +151,26 @@ async function loginHandler(req, res) {
     if (typeof username !== 'string' || typeof password !== 'string') {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    const env = getEnvCredentials();
-    // Use timingSafeEqual for both to avoid revealing which is wrong
-    const userOk = timingSafeEqualString(username, env.username);
-    const passOk = timingSafeEqualString(password, env.password);
-    if (!env.username || !env.password || !userOk || !passOk) {
+    const trimmedUser = username.trim();
+    if (!trimmedUser || typeof password !== 'string' || password.length === 0) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    const token = await createSession(env.username);
+    // DB-backed verification (hashed passwords only)
+    let ok = false;
+    let dbUser = null;
+    try {
+        dbUser = await findAuthUserByUsername(trimmedUser);
+        if (dbUser && dbUser.passwordHash) {
+            ok = verifyPassword(password, dbUser.passwordHash);
+        }
+    } catch {
+        // Do not leak DB errors
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!ok || !dbUser) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const token = await createSession(dbUser.username);
     const isProd = process.env.NODE_ENV === 'production';
     res.cookie('todayai_session', token, {
         httpOnly: true,
@@ -181,8 +179,7 @@ async function loginHandler(req, res) {
         maxAge: SESSION_TTL_MS,
         path: '/'
     });
-    // Do not return password or token in body beyond success
-    res.json({ ok: true, username: env.username });
+    res.json({ ok: true, username: dbUser.username });
 }
 
 async function logoutHandler(req, res) {
