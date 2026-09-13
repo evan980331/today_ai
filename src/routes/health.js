@@ -18,7 +18,11 @@ router.get('/health', async (req, res) => {
         }
     }
     const mcp = process.env.OPENCODE_SERVER_URL ? `active (${process.env.OPENCODE_SERVER_URL})` : 'active';
-    res.json({ status: 'ok', mcp, db, uptime: process.uptime() });
+    let runtime = null;
+    try {
+        runtime = require('../services/opencodeRuntime').describe();
+    } catch {}
+    res.json({ status: 'ok', mcp, db, runtime, uptime: process.uptime() });
 });
 
 module.exports = router;

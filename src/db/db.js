@@ -33,6 +33,35 @@ async function initDb() {
         `;
         await s`CREATE INDEX IF NOT EXISTS idx_chat_logs_session_created ON chat_logs (session_id, created_at DESC)`;
         console.log('[DB] chat_logs table ready');
+        // P0-3: agent session model. chat_logs stays untouched (backward compatible);
+        // agent_sessions tracks lifecycle, owner and workspace linkage.
+        await s`
+            CREATE TABLE IF NOT EXISTS agent_sessions (
+                id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                repository TEXT,
+                branch TEXT,
+                workspace_id TEXT,
+                status TEXT CHECK (status IN ('created','running','completed','failed','cancelled')) NOT NULL DEFAULT 'created',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `;
+        await s`CREATE INDEX IF NOT EXISTS idx_agent_sessions_owner_updated ON agent_sessions (owner, updated_at DESC)`;
+        console.log('[DB] agent_sessions table ready');
+        // Auth sessions for multi-instance deployments (Vercel serverless):
+        // only the SHA-256 hash of the cookie token is stored — never the
+        // token itself, never any password.
+        await s`
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            )
+        `;
+        await s`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions (expires_at)`;
+        console.log('[DB] auth_sessions table ready');
     } catch (e) {
         console.error('[DB] init failed:', e.message);
         // Do not crash server on DB failure
@@ -126,4 +155,101 @@ async function ping() {
     return true;
 }
 
-module.exports = { getSql, initDb, saveLog, getSessions, getHistory, deleteSession, ping, withRetry };
+const AGENT_STATUS = ['created', 'running', 'completed', 'failed', 'cancelled'];
+
+async function createAgentSession({ id, owner, repository = null, branch = null, workspaceId = null }) {
+    const s = getSql();
+    if (!s) return null;
+    if (!id || typeof id !== 'string' || id.length > 128) throw new Error('Invalid agent session id');
+    if (!owner || typeof owner !== 'string' || owner.length > 256) throw new Error('Invalid agent session owner');
+    const rows = await withRetry(() => s`
+        INSERT INTO agent_sessions (id, owner, repository, branch, workspace_id, status)
+        VALUES (${id}, ${owner}, ${repository}, ${branch}, ${workspaceId}, 'created')
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id, owner, repository, branch, workspace_id AS "workspaceId", status, created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+async function getAgentSession(id) {
+    const s = getSql();
+    if (!s) return null;
+    const rows = await withRetry(() => s`
+        SELECT id, owner, repository, branch, workspace_id AS "workspaceId", status,
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM agent_sessions WHERE id = ${id}
+    `);
+    return rows[0] || null;
+}
+
+async function updateAgentSessionStatus(id, status) {
+    const s = getSql();
+    if (!s) return null;
+    if (!AGENT_STATUS.includes(status)) throw new Error(`Invalid agent session status: ${status}`);
+    const rows = await withRetry(() => s`
+        UPDATE agent_sessions SET status = ${status}, updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING id, owner, repository, branch, workspace_id AS "workspaceId", status,
+                  created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+async function listAgentSessions(owner, limit = 50) {
+    const s = getSql();
+    if (!s) return [];
+    const safeLimit = Math.min(Math.max(parseInt(limit) || 50, 1), 100);
+    return withRetry(() => s`
+        SELECT id, owner, repository, branch, workspace_id AS "workspaceId", status,
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM agent_sessions WHERE owner = ${owner}
+        ORDER BY updated_at DESC LIMIT ${safeLimit}
+    `);
+}
+
+async function deleteAgentSession(id) {
+    const s = getSql();
+    if (!s) return;
+    if (!id || typeof id !== 'string' || id.length > 128) throw new Error('Invalid agent session id');
+    await withRetry(() => s`DELETE FROM agent_sessions WHERE id = ${id}`);
+}
+
+async function saveAuthSession({ tokenHash, username, createdAt, expiresAt }) {
+    const s = getSql();
+    if (!s) return null;
+    if (!tokenHash || typeof tokenHash !== 'string' || tokenHash.length > 128) throw new Error('Invalid auth session id');
+    if (!username || typeof username !== 'string' || username.length > 256) throw new Error('Invalid auth session owner');
+    const rows = await withRetry(() => s`
+        INSERT INTO auth_sessions (token_hash, username, created_at, expires_at)
+        VALUES (${tokenHash}, ${username}, ${createdAt}, ${expiresAt})
+        ON CONFLICT (token_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at
+        RETURNING token_hash AS "tokenHash", username,
+                  created_at AS "createdAt", expires_at AS "expiresAt"
+    `);
+    return rows[0] || null;
+}
+
+async function findAuthSession(tokenHash) {
+    const s = getSql();
+    if (!s) return null;
+    const rows = await withRetry(() => s`
+        SELECT token_hash AS "tokenHash", username,
+               created_at AS "createdAt", expires_at AS "expiresAt"
+        FROM auth_sessions WHERE token_hash = ${tokenHash}
+    `);
+    return rows[0] || null;
+}
+
+async function deleteAuthSession(tokenHash) {
+    const s = getSql();
+    if (!s) return;
+    if (!tokenHash || typeof tokenHash !== 'string' || tokenHash.length > 128) throw new Error('Invalid auth session id');
+    await withRetry(() => s`DELETE FROM auth_sessions WHERE token_hash = ${tokenHash}`);
+}
+
+module.exports = {
+    getSql, initDb, saveLog, getSessions, getHistory, deleteSession, ping, withRetry,
+    AGENT_STATUS, createAgentSession, getAgentSession, updateAgentSessionStatus,
+    listAgentSessions, deleteAgentSession,
+    saveAuthSession, findAuthSession, deleteAuthSession
+};

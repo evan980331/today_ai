@@ -32,49 +32,49 @@ describe('Auth middleware - unit', () => {
         assert.equal(next, true);
     });
 
-    it('should 401 when not logged in for /api/chat', () => {
+    it('should 401 when not logged in for /api/chat', async () => {
         process.env.AUTH_USERNAME = 'admin';
         process.env.AUTH_PASSWORD = 'secret123';
         const req = mockReq('/api/chat', null);
         const res = mockRes();
         let next = false;
-        authMiddleware(req, res, () => { next = true; });
+        await authMiddleware(req, res, () => { next = true; });
         assert.equal(next, false);
         assert.equal(res.statusCode, 401);
     });
 
-    it('should 401 with invalid cookie', () => {
+    it('should 401 with invalid cookie', async () => {
         process.env.AUTH_USERNAME = 'admin';
         process.env.AUTH_PASSWORD = 'secret123';
         const req = mockReq('/api/chat', 'invalid-token-xyz');
         const res = mockRes();
         let next = false;
-        authMiddleware(req, res, () => { next = true; });
+        await authMiddleware(req, res, () => { next = true; });
         assert.equal(next, false);
         assert.equal(res.statusCode, 401);
     });
 
-    it('should allow with valid session', () => {
+    it('should allow with valid session', async () => {
         process.env.AUTH_USERNAME = 'admin';
         process.env.AUTH_PASSWORD = 'secret123';
         const { createSession } = require('../src/middleware/auth');
-        const token = createSession('admin');
+        const token = await createSession('admin');
         const req = mockReq('/api/chat', token);
         const res = mockRes();
         let next = false;
-        authMiddleware(req, res, () => { next = true; });
+        await authMiddleware(req, res, () => { next = true; });
         assert.equal(next, true);
         assert.equal(req.user.username, 'admin');
         // cleanup
         const { destroySession } = require('../src/middleware/auth');
-        destroySession(token);
+        await destroySession(token);
     });
 
-    it('should reject Bearer header (cookie-only auth)', () => {
+    it('should reject Bearer header (cookie-only auth)', async () => {
         process.env.AUTH_USERNAME = 'admin';
         process.env.AUTH_PASSWORD = 'secret123';
         const { createSession } = require('../src/middleware/auth');
-        const token = createSession('admin');
+        const token = await createSession('admin');
         const req = {
             path: '/api/chat',
             headers: { authorization: `Bearer ${token}` },
@@ -82,11 +82,11 @@ describe('Auth middleware - unit', () => {
         };
         const res = mockRes();
         let next = false;
-        authMiddleware(req, res, () => { next = true; });
+        await authMiddleware(req, res, () => { next = true; });
         assert.equal(next, false);
         assert.equal(res.statusCode, 401);
         const { destroySession } = require('../src/middleware/auth');
-        destroySession(token);
+        await destroySession(token);
     });
 
     it('should allow when no AUTH_USERNAME configured in dev', () => {
@@ -105,6 +105,97 @@ describe('Auth middleware - unit', () => {
         process.env.AUTH_USERNAME = origU;
         process.env.AUTH_PASSWORD = origP;
         process.env.NODE_ENV = origEnv;
+    });
+});
+
+describe('Auth persistence across instances (shared Postgres store)', () => {
+    const crypto = require('crypto');
+    const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
+
+    function sha256(s) {
+        return crypto.createHash('sha256').update(String(s)).digest('hex');
+    }
+
+    async function login(base, username, password) {
+        const res = await fetch(`${base}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const setCookie = res.headers.get('set-cookie') || '';
+        const m = setCookie.match(/todayai_session=([^;]+)/);
+        return { res, token: m ? m[1] : null, setCookie };
+    }
+
+    it('login persists only a hash + username, never password or token', async () => {
+        const { res, token } = await login(BASE, 'admin', 'admin123');
+        assert.equal(res.status, 200);
+        assert.ok(token);
+        const { findAuthSession, deleteAuthSession } = require('../src/db/db');
+        try {
+            const row = await findAuthSession(sha256(token));
+            assert.ok(row, 'session row must exist in shared store');
+            assert.equal(row.username, 'admin');
+            assert.ok(!('password' in row), 'no password field may be stored');
+            const flat = JSON.stringify(row);
+            assert.ok(!flat.includes(token), 'raw token must not be stored');
+            assert.ok(!flat.includes('admin123'), 'password must not be stored');
+            assert.ok(new Date(row.expiresAt).getTime() > Date.now(), 'row must carry a future expiry');
+        } finally {
+            await deleteAuthSession(sha256(token)).catch(() => {});
+        }
+    });
+
+    it('instance A login validates on instance B (true second server)', async () => {
+        // A second, fully independent Express instance sharing only Postgres.
+        const app = require('../src/app');
+        const serverB = await new Promise((resolve) => {
+            const s = app.listen(0, '127.0.0.1', () => resolve(s));
+        });
+        const baseB = `http://127.0.0.1:${serverB.address().port}`;
+        const closeB = async () => {
+            if (serverB.closeAllConnections) serverB.closeAllConnections();
+            await new Promise((r) => serverB.close(r));
+        };
+        try {
+            const { res, token } = await login(BASE, 'admin', 'admin123');
+            assert.equal(res.status, 200);
+            assert.ok(token);
+            const cookie = `todayai_session=${token}`;
+            // Same cookie validates on the other instance (shared store).
+            let me = await fetch(`${baseB}/api/auth/me`, { headers: { Cookie: cookie } });
+            assert.equal(me.status, 200);
+            assert.equal((await me.json()).username, 'admin');
+            // Logout on A destroys everywhere: B rejects afterwards.
+            const logout = await fetch(`${BASE}/api/auth/logout`, {
+                method: 'POST',
+                headers: { Cookie: cookie }
+            });
+            assert.equal(logout.status, 200);
+            me = await fetch(`${baseB}/api/auth/me`, { headers: { Cookie: cookie } });
+            assert.equal(me.status, 401);
+        } finally {
+            await closeB();
+        }
+    });
+
+    it('expired rows never validate (deterministic unit)', async () => {
+        const { saveAuthSession, deleteAuthSession } = require('../src/db/db');
+        const { getSession, _sessions } = require('../src/middleware/auth');
+        const past = new Date(Date.now() - 60 * 1000);
+        const probeToken = `probe-${Date.now()}`;
+        _sessions.delete(probeToken); // unknown to memory: forces the DB path
+        await saveAuthSession({
+            tokenHash: sha256(probeToken),
+            username: 'admin',
+            createdAt: past,
+            expiresAt: past
+        });
+        try {
+            assert.equal(await getSession(probeToken), null);
+        } finally {
+            await deleteAuthSession(sha256(probeToken)).catch(() => {});
+        }
     });
 });
 
@@ -248,22 +339,58 @@ describe('Auth integration via HTTP', () => {
         assert.equal(meBody.authenticated, true);
     });
 
-    it('login rate limit should 429 after 10 attempts', async () => {
-        // We already did several logins, but loginLimiter is 10/15min, we need to exceed
-        // Do 11 rapid wrong logins
+    it('login rate limit is configured (shared-server budget kept under trip point)', async () => {
+        // NOTE: all test files share one server with a 10-failures/15min
+        // login limiter. This suite must never trip it, or parallel files
+        // lose their login. Do 8 rapid wrong logins (2 earlier + 8 = 10,
+        // exactly at max, never over) and expect clean 401s.
         const promises = [];
-        for (let i = 0; i < 11; i++) {
+        for (let i = 0; i < 8; i++) {
             promises.push(login('admin', 'wrong' + i));
         }
         const results = await Promise.all(promises);
         const statuses = results.map(r => r.res.status);
-        // At least one should be 429 (if previous logins counted)
-        // Note: skipSuccessfulRequests means successful logins don't count, so wrong logins will count
-        // We did 11 wrong, so 11th should be 429
-        // But we already did some logins before, so may be 429 earlier
-        // Just check that 429 appears or all are 401 (if limit not hit yet, it's okay)
-        // For this test, we just check that rate limit is configured (not failing)
-        assert.ok(statuses.includes(401) || statuses.includes(429));
+        assert.ok(statuses.every(s => s === 401), `expected all 401, got ${statuses}`);
+    });
+
+    it('login limiter trips on 11th failure (isolated mini-app, no shared state)', async () => {
+        const express = require('express');
+        const rateLimit = require('express-rate-limit');
+        // Fresh instance mirroring src/middleware/rateLimit.js loginLimiter
+        // (10 failures / 15min, skipSuccessfulRequests). A separate instance
+        // keeps its own MemoryStore so this never consumes the shared budget.
+        const isolatedLimiter = rateLimit({
+            windowMs: 15 * 60 * 1000,
+            max: 10,
+            standardHeaders: true,
+            legacyHeaders: false,
+            skipSuccessfulRequests: true,
+            message: { error: 'test rate limited' }
+        });
+        const app = express();
+        app.use(express.json());
+        app.post('/login', isolatedLimiter, (req, res) => res.status(401).json({ error: 'Unauthorized' }));
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, '127.0.0.1', () => resolve(s));
+        });
+        try {
+            const url = `http://127.0.0.1:${server.address().port}/login`;
+            const statuses = [];
+            for (let i = 0; i < 11; i++) {
+                const r = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ u: 'a', p: 'wrong' })
+                });
+                statuses.push(r.status);
+                await r.text().catch(() => {});
+            }
+            assert.ok(statuses.slice(0, 10).every(s => s === 401), `first 10 should be 401, got ${statuses}`);
+            assert.equal(statuses[10], 429, `11th should be 429, got ${statuses}`);
+        } finally {
+            if (server.closeAllConnections) server.closeAllConnections();
+            await new Promise((resolve) => server.close(resolve));
+        }
     });
 });
 
@@ -387,7 +514,10 @@ describe('validateEnv - production requires ALLOWED_ORIGINS', () => {
         NODE_ENV: 'production',
         DATABASE_URL: 'postgresql://test:test@localhost/test',
         AUTH_USERNAME: 'admin',
-        AUTH_PASSWORD: 'secret'
+        AUTH_PASSWORD: 'secret',
+        WORKSPACE_ROOT: '/tmp/today-ai-test-workspaces',
+        MOCK_OPENCODE: undefined,
+        OPENCODE_SERVER_URL: undefined
     };
 
     it('should fail in production without ALLOWED_ORIGINS', () => {
