@@ -17,6 +17,21 @@
 // app initialization; the app boots on first invocation and is reused by
 // Node's module cache on warm invocations.
 module.exports = (req, res) => {
+    // Vercel rewrites /api/:path* -> /api may mutate req.url to /api in some
+    // runtime versions (warning: "rewrites now route using destination path").
+    // Restore original path from Vercel forwarding headers when possible.
+    // Local http.createServer tests pass original url unchanged, so this is no-op there.
+    if (req.url === '/api' || req.url === '/api/') {
+        const cand = req.headers['x-matched-path']
+            || req.headers['x-vercel-matched-path']
+            || req.headers['x-invoke-path']
+            || req.headers['x-forwarded-uri']
+            || req.headers['x-original-uri']
+            || req.headers['x-vercel-original-uri'];
+        if (cand && typeof cand === 'string' && cand.startsWith('/api/')) {
+            req.url = cand;
+        }
+    }
     const app = require('../src/app');
     return app(req, res);
 };

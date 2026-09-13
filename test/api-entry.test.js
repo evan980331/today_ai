@@ -97,25 +97,60 @@ describe('Vercel api entrypoint', () => {
         }
     });
 
-    it('Vercel catch-all api/[...all].js exports same handler (parity)', async () => {
-        const handlerAll = require('../api/[...all].js');
-        const handlerIndex = require('../api/index.js');
-        // Both should be functions handling (req,res)
-        assert.equal(typeof handlerAll, 'function');
-        assert.equal(typeof handlerIndex, 'function');
-        // Functional parity: GET /api/health via [...all] also 200
+    it('Vercel rewrite /api/:path* -> /api preserves routing via handler', async () => {
+        // Simulate Vercel rewrites where req.url is mutated to /api but original
+        // path is in x-matched-path header. Handler must restore it.
+        const handler = require('../api/index.js');
         const http2 = require('http');
-        const s2 = http2.createServer((req, res) => handlerAll(req, res));
+        const s2 = http2.createServer((req, res) => handler(req, res));
         await new Promise((r) => s2.listen(0, '127.0.0.1', r));
         const base2 = `http://127.0.0.1:${s2.address().port}`;
         try {
+            // Direct routing (no rewrite) — baseline
             const r = await fetch(`${base2}/api/health`);
             assert.equal(r.status, 200);
-            const r2 = await fetch(`${base2}/api/auth/login`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: 'x', password: 'y' })
+            // Simulated rewrite: request arrives as /api but header carries original
+            const r2 = await new Promise((resolve, reject) => {
+                const opts = {
+                    hostname: '127.0.0.1',
+                    port: new URL(base2).port,
+                    path: '/api',
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-matched-path': '/api/auth/login'
+                    }
+                };
+                const req2 = http2.request(opts, (res2) => {
+                    let d = '';
+                    res2.on('data', (c) => d += c);
+                    res2.on('end', () => resolve({ status: res2.statusCode, body: d }));
+                });
+                req2.on('error', reject);
+                req2.write(JSON.stringify({ username: 'x', password: 'y' }));
+                req2.end();
             });
-            assert.notEqual(r2.status, 404);
+            // Should be routed to login (401), not 404
+            assert.notEqual(r2.status, 404, 'rewritten login must not be 404');
+            assert.equal(r2.status, 401);
+            // health via rewrite header
+            const r3 = await new Promise((resolve, reject) => {
+                const opts = {
+                    hostname: '127.0.0.1',
+                    port: new URL(base2).port,
+                    path: '/api',
+                    method: 'GET',
+                    headers: { 'x-matched-path': '/api/health' }
+                };
+                const req3 = http2.request(opts, (res3) => {
+                    let d = '';
+                    res3.on('data', (c) => d += c);
+                    res3.on('end', () => resolve({ status: res3.statusCode, body: d }));
+                });
+                req3.on('error', reject);
+                req3.end();
+            });
+            assert.equal(r3.status, 200, 'rewritten health must be 200');
         } finally {
             if (s2.closeAllConnections) s2.closeAllConnections();
             await new Promise((r) => s2.close(r));
