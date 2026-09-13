@@ -47,4 +47,78 @@ describe('Vercel api entrypoint', () => {
         const body = await res.json();
         assert.equal(body.status, 'ok');
     });
+
+    it('POST /api/auth/login is routed (not 404), wrong creds -> 401', async () => {
+        const res = await fetch(`${base}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: 'nope', password: 'wrong' })
+        });
+        assert.notEqual(res.status, 404, 'login route must be registered');
+        assert.equal(res.status, 401);
+        const body = await res.json();
+        assert.equal(body.error, 'Unauthorized');
+    });
+
+    it('POST /api/auth/logout is routed (not 404)', async () => {
+        const res = await fetch(`${base}/api/auth/logout`, { method: 'POST' });
+        assert.notEqual(res.status, 404, 'logout route must be registered');
+        // without cookie it still returns 200 (clears cookie)
+        assert.equal(res.status, 200);
+    });
+
+    it('GET /api/auth/me without session is 401 not 404', async () => {
+        const res = await fetch(`${base}/api/auth/me`);
+        assert.notEqual(res.status, 404);
+        assert.equal(res.status, 401);
+    });
+
+    it('POST /api/auth/login with valid user reaches handler (real DB user)', async () => {
+        const db = require('../src/db/db');
+        const { hashPassword } = require('../src/services/password');
+        if (!db.getSql()) {
+            // no DB in this env — skip (handled by other 401 test)
+            return;
+        }
+        const hash = hashPassword('testpass123');
+        await db.upsertAuthUser({ username: 'mockuser', passwordHash: hash });
+        try {
+            const res = await fetch(`${base}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: 'mockuser', password: 'testpass123' })
+            });
+            assert.equal(res.status, 200);
+            const body = await res.json();
+            assert.equal(body.ok, true);
+            assert.equal(body.username, 'mockuser');
+        } finally {
+            await db.deleteAuthUser('mockuser').catch(() => {});
+        }
+    });
+
+    it('Vercel catch-all api/[...all].js exports same handler (parity)', async () => {
+        const handlerAll = require('../api/[...all].js');
+        const handlerIndex = require('../api/index.js');
+        // Both should be functions handling (req,res)
+        assert.equal(typeof handlerAll, 'function');
+        assert.equal(typeof handlerIndex, 'function');
+        // Functional parity: GET /api/health via [...all] also 200
+        const http2 = require('http');
+        const s2 = http2.createServer((req, res) => handlerAll(req, res));
+        await new Promise((r) => s2.listen(0, '127.0.0.1', r));
+        const base2 = `http://127.0.0.1:${s2.address().port}`;
+        try {
+            const r = await fetch(`${base2}/api/health`);
+            assert.equal(r.status, 200);
+            const r2 = await fetch(`${base2}/api/auth/login`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: 'x', password: 'y' })
+            });
+            assert.notEqual(r2.status, 404);
+        } finally {
+            if (s2.closeAllConnections) s2.closeAllConnections();
+            await new Promise((r) => s2.close(r));
+        }
+    });
 });
