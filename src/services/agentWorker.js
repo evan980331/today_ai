@@ -68,6 +68,7 @@ function randomPassword() {
 }
 
 function opencodeBinary() {
+    if (process.env.OPENCODE_PATH && process.env.OPENCODE_PATH.trim()) return process.env.OPENCODE_PATH.trim();
     return process.platform === 'win32' ? 'opencode.exe' : 'opencode';
 }
 
@@ -75,7 +76,12 @@ function opencodeBinary() {
 // Default mirrors opencode.js platform handling: on Windows only the npm
 // shims (opencode.cmd/.ps1) sit on PATH, so bare `opencode.exe` fails with
 // ENOENT and the proven `powershell -Command opencode ...` form is used.
+// OPENCODE_PATH overrides the binary location (e.g. C:\tools\opencode.exe).
 function defaultSpawn(args, opts) {
+    const custom = process.env.OPENCODE_PATH && process.env.OPENCODE_PATH.trim();
+    if (custom) {
+        return require('child_process').spawn(custom, args, { ...opts, windowsHide: true });
+    }
     if (process.platform === 'win32') {
         const quoted = args.map((a) => (a.includes(' ') ? `"${a.replace(/"/g, '""')}"` : a)).join(' ');
         return require('child_process').spawn('powershell.exe', ['-NoProfile', '-Command', `opencode ${quoted}`], {
@@ -115,9 +121,46 @@ function setStatus(worker, status, err) {
     }
 }
 
+// Windows whole-tree kill. The worker spawn target is a wrapper
+// (powershell, or an OPENCODE_PATH binary which may itself shell out), so
+// killing only the wrapper leaves the real `opencode serve` child alive,
+// squatting its port and locking the workspace. `taskkill /PID <wrapper>
+// /T /F` kills the wrapper pid's tree atomically — no orphan window.
+// Targets ONLY this wrapper pid, never anything else. Never throws, never
+// logs (no pids-as-secrets concern either way: nothing is printed).
+function taskkillTree(pid, force) {
+    return new Promise((resolve) => {
+        if (!Number.isInteger(pid) || pid <= 0) return resolve(false);
+        const args = force
+            ? ['/PID', String(pid), '/T', '/F']
+            : ['/PID', String(pid), '/T'];
+        let child = null;
+        try {
+            child = require('child_process').spawn('taskkill', args, {
+                windowsHide: true,
+                stdio: 'ignore'
+            });
+        } catch {
+            return resolve(false);
+        }
+        const done = (ok) => resolve(ok);
+        child.once('error', () => done(false));
+        child.once('close', (code) => done(code === 0));
+    });
+}
+
 function killProcess(proc, { gracefulMs = 5000 } = {}) {
     return new Promise((resolve) => {
         if (!proc || proc.exitCode !== null) return resolve({ alreadyGone: true, forced: false });
+        const isWin = process.platform === 'win32';
+        const pid = proc && proc.pid;
+        const treePid = Number.isInteger(pid) && pid > 0 ? pid : null;
+        // Windows with a real wrapper pid: Node maps child.kill() to
+        // TerminateProcess on the wrapper, which does NOT take console
+        // children with it — a SIGTERM-first sequence would orphan the
+        // opencode child before any escalation could run. Kill the whole
+        // tree up front while the pid is definitely ours instead.
+        if (isWin && treePid !== null) return killWindowsTree(proc, treePid, resolve);
         let done = false;
         let escalated = false;
         const finish = (forced) => {
@@ -141,6 +184,38 @@ function killProcess(proc, { gracefulMs = 5000 } = {}) {
             clearTimeout(timer);
             finish(false);
         }
+    });
+}
+
+// Windows tree-kill path (real wrapper pid only). Resolves forced:true once
+// the wrapper exit is observed (after a best-effort sweep, so a lingering
+// child cannot survive unnoticed) or after a bounded settle — never hangs,
+// never throws. A stale pid (wrapper already reaped) fails safe.
+function killWindowsTree(proc, treePid, resolve) {
+    let done = false;
+    const finish = (forced) => {
+        if (done) return;
+        done = true;
+        resolve({ alreadyGone: false, forced });
+    };
+    const sweep = () => taskkillTree(treePid, true).then(
+        () => finish(true),
+        () => finish(true)
+    );
+    try {
+        proc.once('exit', () => { sweep(); });
+    } catch {
+        return finish(true);
+    }
+    taskkillTree(treePid, true).then((ok) => {
+        if (!ok) {
+            // taskkill itself unavailable: last-resort direct kill.
+            try { proc.kill('SIGKILL'); } catch {}
+        }
+        // Bounded settle for the exit event (and its sweep), then resolve
+        // regardless: stopWorker must never hang.
+        const fallback = setTimeout(() => finish(true), 5000);
+        if (fallback.unref) fallback.unref();
     });
 }
 
@@ -188,12 +263,22 @@ async function startWorker(workerId, { timeoutMs = WORKER_START_TIMEOUT_MS, spaw
         throw workerError('WORKER_BAD_STATE', `cannot start worker in status ${worker.status}`);
     }
     setStatus(worker, 'starting');
+    // Workspaces created before the MCP fix (or externally) may lack
+    // opencode.json: ensure it idempotently. cwd stays workspacePath.
+    try {
+        require('./workerMcpConfig').ensureWorkerOpenCodeConfig(worker.workspacePath);
+    } catch (e) {
+        console.warn(`[Worker] could not ensure workspace opencode.json: ${(e && e.message) || e}`);
+    }
+    try {
+        require('./workerMcpConfig').warnMissingMcpCredentials();
+    } catch {}
     const spawn = spawnFn || defaultSpawn;
     let proc;
     try {
         proc = spawn(['serve', '--hostname', '127.0.0.1', '--port', String(worker.port)], {
             cwd: worker.workspacePath,
-            env: { ...process.env, OPENCODE_SERVER_PASSWORD: worker.password },
+            env: { ...process.env, OPENCODE_SERVER_USERNAME: worker.username, OPENCODE_SERVER_PASSWORD: worker.password },
             windowsHide: true
         });
     } catch (e) {
@@ -240,10 +325,16 @@ async function healthWorker(workerId, opts = {}) {
     return { ...h, workerId, status: worker.status };
 }
 
-// stopWorker(workerId, { cleanup }) -> graceful SIGTERM, SIGKILL fallback,
-// then unregister. Sessions must already be aborted/completed by the caller:
-// stop never assumes it is safe to kill mid-write, it only guarantees the
-// process is gone afterwards (no zombies).
+// stopWorker(workerId, { cleanup }) -> terminate the whole process tree,
+// then unregister. Windows (real wrapper pid): taskkill /PID <wrapper> /T
+// /F up front — SIGTERM cannot gracefully stop a console tree there (Node
+// maps it to TerminateProcess on the wrapper, orphaning the opencode
+// child), so the tree is killed atomically while the pid is ours. POSIX
+// (and pid-less test doubles): SIGTERM first, SIGKILL fallback, unchanged.
+// Sessions must already be aborted/completed by the caller: stop never
+// assumes it is safe to kill mid-write, it only guarantees the process
+// tree is gone afterwards (no zombies, no orphans) before reporting
+// stopped. Already-gone processes resolve idempotently.
 async function stopWorker(workerId, { cleanup = false, gracefulMs = 5000 } = {}) {
     const worker = workers.get(workerId);
     if (!worker) throw workerError('WORKER_NOT_FOUND', `unknown worker: ${workerId}`);
@@ -414,6 +505,7 @@ module.exports = {
     WORKER_START_TIMEOUT_MS,
     AGENT_EXECUTION_TIMEOUT_MS,
     allocatePort,
+    killProcess,
     createWorker,
     startWorker,
     healthWorker,

@@ -253,6 +253,7 @@ describe('P0.7 worker-side API routes', () => {
         aw.markIdle = () => ({});
         aw.workerClient = () => ({
             createSession: async () => ({ id: 'ses_stub' }),
+            subscribeSessionEvents: async () => ({ ended: 'idle' }),
             promptSession: async () => ({ result: 'stub-result', mcpTools: ['stub_tool'] })
         });
         return { orig, store };

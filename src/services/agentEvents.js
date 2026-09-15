@@ -116,4 +116,43 @@ function normalizeServerEvent(raw, partTypes = {}) {
     }
 }
 
-module.exports = { PLATFORM_TYPES, normalizeOpenCodeEvent, normalizeServerEvent, parseStreamLine };
+// Stateful SSE tool collector. Feeds RAW server /event objects through the
+// single normalizeServerEvent() parser (no second parser) and accumulates
+// distinct MCP tool names in first-seen order. Text deltas, idle frames and
+// malformed events never count as tools.
+function createToolCollector() {
+    const partTypes = {};
+    const tools = new Set();
+    return {
+        onRawEvent(raw) {
+            const norm = normalizeServerEvent(raw, partTypes);
+            if (norm && norm.type === 'tool.started' && norm.tool) {
+                tools.add(norm.tool);
+            }
+        },
+        tools() {
+            return Array.from(tools);
+        }
+    };
+}
+
+// Union of MCP tool name lists: deduped (case-insensitive, already
+// lowercased by the normalizers), first-seen order, non-strings dropped.
+// Empty/absent inputs yield [].
+function mergeMcpTools(...lists) {
+    const out = [];
+    const seen = new Set();
+    for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const t of list) {
+            if (typeof t !== 'string') continue;
+            const name = t.toLowerCase();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            out.push(name);
+        }
+    }
+    return out;
+}
+
+module.exports = { PLATFORM_TYPES, normalizeOpenCodeEvent, normalizeServerEvent, parseStreamLine, createToolCollector, mergeMcpTools };

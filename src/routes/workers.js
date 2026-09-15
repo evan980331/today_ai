@@ -27,6 +27,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const agentWorker = require('../services/agentWorker');
+const { createToolCollector, mergeMcpTools } = require('../services/agentEvents');
 const { validateWorkspaceId } = require('../services/workspace');
 const { validateSessionId } = require('../services/session');
 const { validateRepoUrl, validateRef } = require('../services/git');
@@ -152,10 +153,22 @@ router.post('/workers/:id/execute', async (req, res) => {
         try {
             agentWorker.markRunning(id);
             const client = agentWorker.workerClient(id);
+            const collector = createToolCollector();
             const ses = await client.createSession({ title: prompt.slice(0, 80) });
-            const out = await client.promptSession(ses.id, prompt, { signal: controller.signal, timeoutMs: timeoutMs - 5000 });
+            // SSE subscription runs alongside the prompt so tool calls observed
+            // on the event stream merge into mcpTools; the POST /message
+            // response alone misses them (its parts carry text only).
+            const evDone = client.subscribeSessionEvents(ses.id, {
+                signal: controller.signal,
+                onRawEvent: (raw) => collector.onRawEvent(raw)
+            });
+            const msgP = client.promptSession(ses.id, prompt, { signal: controller.signal, timeoutMs: timeoutMs - 5000 });
+            const [, msgRes] = await Promise.all([evDone, msgP]);
             agentWorker.markIdle(id);
-            res.json({ result: out.result || '', mcpTools: out.mcpTools || [] });
+            res.json({
+                result: (msgRes && msgRes.result) || '',
+                mcpTools: mergeMcpTools(msgRes && msgRes.mcpTools, collector.tools())
+            });
         } finally {
             clearTimeout(timer);
             inflight.delete(id);
@@ -219,16 +232,20 @@ router.post('/workers/:id/execute/stream', async (req, res) => {
         try {
             agentWorker.markRunning(id);
             const client = agentWorker.workerClient(id);
+            const collector = createToolCollector();
             const ses = await client.createSession({ title: prompt.slice(0, 80) });
             const evDone = client.subscribeSessionEvents(ses.id, {
                 signal: controller.signal,
-                onRawEvent: (raw) => { sseSendSafe(res, 'upstream', raw); }
+                onRawEvent: (raw) => { collector.onRawEvent(raw); sseSendSafe(res, 'upstream', raw); }
             });
             const msgP = client.promptSession(ses.id, prompt, { signal: controller.signal });
             const [, msgRes] = await Promise.all([evDone, msgP]);
             agentWorker.markIdle(id);
             if (!ended) {
-                sseSendSafe(res, 'done', { result: (msgRes && msgRes.result) || '', mcpTools: (msgRes && msgRes.mcpTools) || [] });
+                sseSendSafe(res, 'done', {
+                    result: (msgRes && msgRes.result) || '',
+                    mcpTools: mergeMcpTools(msgRes && msgRes.mcpTools, collector.tools())
+                });
                 ended = true;
                 res.end();
             }
