@@ -7,6 +7,7 @@ const cookieParser = require('cookie-parser');
 const { validateEnv } = require('./middleware/validateEnv');
 const { initDb } = require('./db/db');
 const healthRouter = require('./routes/health');
+const debugEnvRouter = require('./routes/debugEnv'); // TEMPORARY diagnostic, to be deleted
 const chatRouter = require('./routes/chat');
 const streamRouter = require('./routes/stream');
 const sessionsRouter = require('./routes/sessions');
@@ -56,6 +57,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Routes: health & login are public, rest requires auth
 app.use('/api', healthRouter);
+app.use('/api', debugEnvRouter); // TEMPORARY diagnostic, to be deleted
 app.post('/api/auth/login', loginLimiter, loginHandler);
 app.post('/api/auth/logout', logoutHandler);
 app.use('/api', authMiddleware);
