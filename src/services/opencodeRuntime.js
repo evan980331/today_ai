@@ -44,6 +44,14 @@ async function executeStream({ prompt, workspaceId = null, sessionId = null, sig
     if (useRemoteWorker()) {
         return streamViaRemote({ prompt: prompt.trim(), workspaceId, sessionId, signal, timeoutMs, emit });
     }
+    if (process.env.NODE_ENV === 'production') {
+        const hasUrl = !!(process.env.WORKER_URL && process.env.WORKER_URL.trim());
+        const hasSecret = !!(process.env.WORKER_SHARED_SECRET && process.env.WORKER_SHARED_SECRET.trim());
+        const msg = (hasUrl || hasSecret)
+            ? 'Remote Worker misconfigured: WORKER_URL and WORKER_SHARED_SECRET must both be set'
+            : 'Remote Worker is not configured';
+        throw runtimeError('RUNTIME_UNAVAILABLE', msg);
+    }
     return streamViaLocal({ prompt: prompt.trim(), workspaceId, sessionId, signal, emit });
 }
 
@@ -137,11 +145,9 @@ function abort(target) {
 }
 
 async function health() {
-    const mode = opencodeService.getRuntimeMode();
-    if (mode === 'mock') return { available: true, runtime: 'opencode', mode };
-    if (mode === 'unavailable') {
-        return { available: false, runtime: 'opencode', mode, reason: opencodeService.getRuntimeDetail().reason };
-    }
+    // Remote Worker first: in production without OPENCODE_SERVER_URL the
+    // local runtime is 'unavailable', but that must never shadow a
+    // configured remote worker.
     if (useRemoteWorker()) {
         // Reachability probe without creating workers: lightweight GET.
         try {
@@ -159,6 +165,11 @@ async function health() {
             return { available: false, runtime: 'opencode', mode: 'remote-worker', reason: e.message };
         }
     }
+    const mode = opencodeService.getRuntimeMode();
+    if (mode === 'mock') return { available: true, runtime: 'opencode', mode };
+    if (mode === 'unavailable') {
+        return { available: false, runtime: 'opencode', mode, reason: opencodeService.getRuntimeDetail().reason };
+    }
     return { available: true, runtime: 'opencode', mode };
 }
 
@@ -166,6 +177,9 @@ function describe() {
     // Synchronous, side-effect-free mode readout for /api/health.
     // Never probes the network (unlike health() in remote mode).
     // Shape stays compatible with the previous runtime detail payload.
+    if (useRemoteWorker()) {
+        return { runtime: 'opencode', mode: 'remote', reason: 'remote worker' };
+    }
     try {
         const detail = opencodeService.getRuntimeDetail();
         return { runtime: 'opencode', mode: detail.mode, reason: detail.reason || null };
