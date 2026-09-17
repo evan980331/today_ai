@@ -5,10 +5,13 @@ const { useRemoteWorker } = require('../services/workerProvider');
 const router = express.Router();
 
 router.get('/debug-env', (req, res) => {
+    const detail = require('../services/opencodeRuntime').describe();
     res.json({
         workerUrlPresent: Boolean(process.env.WORKER_URL),
         workerSecretPresent: Boolean(process.env.WORKER_SHARED_SECRET),
-        remoteResult: useRemoteWorker()
+        remoteResult: useRemoteWorker(),
+        describeMode: detail.mode,
+        describeReason: detail.reason || null
     });
 });
 
