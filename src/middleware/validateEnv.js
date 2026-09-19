@@ -69,7 +69,11 @@ function validateEnv() {
     } else if (isProd && hasWorkerUrl) {
         console.log('[ENV] remote Agent Worker mode enabled');
     }
-    if (isProd && !process.env.OPENCODE_SERVER_URL) {
+    // Remote Worker mode needs no OPENCODE_SERVER_URL: silence this warning
+    // when the worker pair is configured so boot logs agree with the
+    // health/chat/stream runtime decision (remote first). Local/direct mode
+    // keeps the warning.
+    if (isProd && !process.env.OPENCODE_SERVER_URL && !(hasWorkerUrl && hasWorkerSecret)) {
         console.warn('[ENV] OPENCODE_SERVER_URL not set: OpenCode runtime unavailable in production (chat returns explicit 503)');
     }
     if (!isProd && !process.env.DATABASE_URL) {

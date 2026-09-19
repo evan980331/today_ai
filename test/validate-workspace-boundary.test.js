@@ -72,6 +72,29 @@ describe('validateEnv WORKSPACE_ROOT is optional on Vercel API', () => {
         assert.equal(await withEnv({ ...baseProd, MOCK_OPENCODE: 'true' }, () => exitsWith(() => validateEnv())), true);
     });
 
+    it('remote worker configured silences OPENCODE warning; unconfigured keeps it', async () => {
+        const { validateEnv } = require('../src/middleware/validateEnv');
+        async function logsFor(overrides) {
+            const lines = [];
+            const origWarn = console.warn;
+            const origErr = console.error;
+            const origLog = console.log;
+            console.warn = (...a) => lines.push(a.join(' '));
+            console.error = (...a) => lines.push(a.join(' '));
+            console.log = (...a) => lines.push(a.join(' '));
+            try { await withEnv(overrides, () => validateEnv()); } catch {}
+            console.warn = origWarn;
+            console.error = origErr;
+            console.log = origLog;
+            return lines.join('\n');
+        }
+        const withRemote = await logsFor({ ...baseProd, WORKER_URL: 'https://worker.example.com', WORKER_SHARED_SECRET: 'secret' });
+        assert.ok(withRemote.includes('remote Agent Worker mode enabled'));
+        assert.ok(!withRemote.includes('OpenCode runtime unavailable in production'), 'remote mode must silence the OPENCODE warning');
+        const withoutRemote = await logsFor({ ...baseProd });
+        assert.ok(withoutRemote.includes('OpenCode runtime unavailable in production'), 'local/direct mode keeps the OPENCODE warning');
+    });
+
     it('WORKER_URL / WORKER_SHARED_SECRET half-configured in production still fails', async () => {
         assert.equal(await withEnv({ ...baseProd, WORKER_URL: 'https://worker.example.com', WORKER_SHARED_SECRET: undefined }, () => exitsWith(() => validateEnv())), true);
         assert.equal(await withEnv({ ...baseProd, WORKER_URL: undefined, WORKER_SHARED_SECRET: 'secret' }, () => exitsWith(() => validateEnv())), true);
