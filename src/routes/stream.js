@@ -131,10 +131,16 @@ router.post('/chat/stream', chatLimiter, async (req, res) => {
         await finish(isAbort ? 'cancelled' : 'failed');
         if (!res.writableEnded) {
             const status = isUnavailable ? 503 : isNotImplemented ? 501 : 500;
+            // Diagnostic passthrough: the original error code (e.g.
+            // WORKER_AUTH vs WORKER_UNREACHABLE) so callers can tell
+            // same-message failures apart. Codes are fixed enum strings;
+            // never secrets, URLs, or headers.
+            const errCode = (err && typeof err.code === 'string') ? err.code : undefined;
             sseSend(res, 'error', {
                 type: 'error',
                 message: isAbort ? 'aborted' : isTimeout ? 'OpenCode timeout' : isUnavailable ? 'OpenCode runtime unavailable' : isNotImplemented ? 'OpenCode Server API not implemented' : 'OpenCode execution failed',
-                status
+                status,
+                code: errCode
             });
             res.end();
         }

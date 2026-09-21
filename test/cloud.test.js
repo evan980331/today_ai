@@ -839,6 +839,44 @@ describe('P0-5 POST /api/chat/stream over HTTP', () => {
         assert.equal(res.status, 400);
     });
 
+    it('SSE error event carries through original error code (diagnostic)', async () => {
+        const orch = require('../src/services/agentOrchestrator');
+        const orig = orch.streamTask;
+        async function errorBody(code, message) {
+            const err = new Error(message);
+            if (code !== undefined) err.code = code;
+            orch.streamTask = async () => { throw err; };
+            try {
+                const res = await readStream('force failure for code test');
+                assert.equal(res.status, 200);
+                const text = await res.text();
+                const events = [];
+                for (const chunk of text.split('\n\n')) {
+                    const ev = (chunk.match(/^event:\s*(.+)$/m) || [])[1];
+                    const dm = chunk.match(/^data:\s*(.+)$/m);
+                    if (ev && dm) events.push({ ev, data: JSON.parse(dm[1]) });
+                }
+                const errEv = events.find(e => e.ev === 'error');
+                assert.ok(errEv, 'must contain error event');
+                return errEv.data;
+            } finally {
+                orch.streamTask = orig;
+            }
+        }
+        const auth = await errorBody('WORKER_AUTH', 'Worker rejected credentials');
+        assert.equal(auth.code, 'WORKER_AUTH');
+        assert.equal(auth.message, 'OpenCode runtime unavailable');
+        assert.equal(auth.status, 503);
+        const unreach = await errorBody('WORKER_UNREACHABLE', 'Agent Worker unreachable');
+        assert.equal(unreach.code, 'WORKER_UNREACHABLE');
+        assert.equal(unreach.message, 'OpenCode runtime unavailable');
+        assert.equal(unreach.status, 503);
+        const plain = await errorBody(undefined, 'boom');
+        assert.equal(plain.message, 'OpenCode execution failed');
+        assert.ok(!('code' in plain), 'codeless errors must keep the old shape');
+        assert.ok(!('cookie' in plain) && !('password' in plain) && !('token' in plain), 'no secrets in SSE data');
+    });
+
     it('client abort does not crash server', async () => {
         const controller = new AbortController();
         const p = fetch(`${localBase}/api/chat/stream`, {
