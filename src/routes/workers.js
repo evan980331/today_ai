@@ -220,14 +220,18 @@ router.post('/workers/:id/execute/stream', async (req, res) => {
         }, timeoutMs);
         if (timer.unref) timer.unref();
         let ended = false;
-        // NOTE: req 'close' fires when the request BODY is consumed, NOT on
-        // client disconnect. Disconnect is res 'close' with !writableEnded.
         res.on('close', () => {
+            console.warn(`[workers] res close workerId=${id} ended=${ended} writableEnded=${res.writableEnded} destroyed=${res.destroyed} socketDestroyed=${req.socket?.destroyed} signalAborted=${controller.signal.aborted}`);
             if (!ended && !res.writableEnded) {
-                console.warn(`[workers] res close -> abort workerId=${id} ended=${ended}`);
-                ended = true;
-                try { controller.abort(); } catch {}
-                inflight.delete(id);
+                // Only abort on true client/socket disconnect, not on request-body consumption.
+                if (req.socket?.destroyed || res.destroyed) {
+                    console.warn(`[workers] true disconnect -> abort workerId=${id}`);
+                    ended = true;
+                    try { controller.abort(); } catch {}
+                    inflight.delete(id);
+                } else {
+                    console.warn(`[workers] res close ignored (not a disconnect) workerId=${id}`);
+                }
             }
         });
         try {
@@ -240,7 +244,15 @@ router.post('/workers/:id/execute/stream', async (req, res) => {
                 onRawEvent: (raw) => { collector.onRawEvent(raw); sseSendSafe(res, 'upstream', raw); }
             });
             const msgP = client.promptSession(ses.id, prompt, { signal: controller.signal });
-            const [, msgRes] = await Promise.all([evDone, msgP]);
+            const evDoneLogged = evDone.then(
+                (v) => { console.warn(`[workers] evDone resolved workerId=${id}`); return v; },
+                (e) => { console.warn(`[workers] evDone rejected workerId=${id} code=${e && e.code} name=${e && e.name} msg=${(e && e.message || '').slice(0,120)} signalAborted=${controller.signal.aborted}`); throw e; }
+            );
+            const msgPLogged = msgP.then(
+                (v) => { console.warn(`[workers] msgP resolved workerId=${id} resultLen=${(v && v.result || '').length}`); return v; },
+                (e) => { console.warn(`[workers] msgP rejected workerId=${id} code=${e && e.code} name=${e && e.name} msg=${(e && e.message || '').slice(0,120)} signalAborted=${controller.signal.aborted}`); throw e; }
+            );
+            const [, msgRes] = await Promise.all([evDoneLogged, msgPLogged]);
             agentWorker.markIdle(id);
             if (!ended) {
                 sseSendSafe(res, 'done', {
