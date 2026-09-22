@@ -108,16 +108,20 @@ async function streamLocalServer(client, signal, { prompt, sessionId, state, emi
 async function streamViaRemote({ prompt, workspaceId, sessionId, signal, timeoutMs, emit }) {
     const { RemoteWorkerClient } = require('./remoteWorker');
     const rc = new RemoteWorkerClient({});
+    const dbg = require('../utils/workerDebugLog');
+    dbg.log('opencodeRuntime', 'create-worker', { sessionId, workspaceId: workspaceId || null });
     console.warn(`[opencodeRuntime] streamViaRemote create worker workspaceId=${workspaceId || 'null'}`);
     const w = await rc.create({ workspaceId });
+    dbg.log('opencodeRuntime', 'worker-created', { sessionId, workerId: w.workerId });
     console.warn(`[opencodeRuntime] worker created id=${w.workerId}`);
     const partTypes = {};
     const state = { fullText: '', tools: new Set() };
     const workerTimeoutMs = parseInt(process.env.WORKER_REQUEST_TIMEOUT_MS, 10) || timeoutMs || 600000;
     let abortSrc = null;
-    const onSignalAbort = () => { abortSrc = 'signal-abort'; console.warn(`[opencodeRuntime] signal abort fired`); };
+    const onSignalAbort = () => { abortSrc = 'signal-abort'; dbg.log('opencodeRuntime', 'signal-abort', { sessionId, workerId: w.workerId }); console.warn(`[opencodeRuntime] signal abort fired`); };
     if (signal) signal.addEventListener('abort', onSignalAbort, { once: true });
     try {
+        dbg.log('opencodeRuntime', 'executeStream-start', { sessionId, workerId: w.workerId });
         console.warn(`[opencodeRuntime] executeStream start workerId=${w.workerId}`);
         const out = await rc.executeStream(w.workerId, {
             prompt,
@@ -134,15 +138,18 @@ async function streamViaRemote({ prompt, workspaceId, sessionId, signal, timeout
                 emit(norm);
             }
         });
+        dbg.log('opencodeRuntime', 'executeStream-done', { sessionId, workerId: w.workerId, resultLen: (out && out.result || '').length });
         console.warn(`[opencodeRuntime] executeStream done resultLen=${(out && out.result || '').length}`);
         const result = (out && out.result) || state.fullText;
         const tools = (out && Array.isArray(out.mcpTools) && out.mcpTools.length) ? out.mcpTools : Array.from(state.tools);
         return { result, mcpTools: tools };
     } catch (e) {
+        dbg.log('opencodeRuntime', 'executeStream-error', { sessionId, workerId: w.workerId, code: e && e.code || null, name: e && e.name || null, msg: (e && e.message || '').slice(0,200), abortSrc, signalAborted: !!(signal && signal.aborted) });
         console.warn(`[opencodeRuntime] executeStream error code=${e && e.code} msg=${(e && e.message || '').slice(0,120)} abortSrc=${abortSrc} signalAborted=${signal && signal.aborted}`);
         throw e;
     } finally {
         if (signal) signal.removeEventListener('abort', onSignalAbort);
+        dbg.log('opencodeRuntime', 'destroy-worker', { sessionId, workerId: w.workerId });
         console.warn(`[opencodeRuntime] destroy worker ${w.workerId}`);
         await rc.destroy(w.workerId).catch(() => {});
     }

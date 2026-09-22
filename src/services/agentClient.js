@@ -326,6 +326,7 @@ class OpenCodeClient {
             const finishResolve = (v) => { if (settled) return; settled = true; cleanup(); resolve(v); };
             const finishReject = (e) => { if (settled) return; settled = true; cleanup(); reject(e); };
             const onAbort = () => {
+                try { require('../utils/workerDebugLog').log('agentClient', 'subscribe-abort', { opencodeSessionId }); } catch {}
                 console.warn(`[agentClient] subscribeServerEvents abort opencodeSessionId=${opencodeSessionId}`);
                 const err = new Error('OpenCode event stream aborted by client');
                 err.code = 'ABORTED';
@@ -378,6 +379,7 @@ class OpenCodeClient {
                     }
                     finishResolve({ ended: 'closed', sessionId: opencodeSessionId });
                 } catch (e) {
+                    try { require('../utils/workerDebugLog').log('agentClient', 'subscribe-error', { opencodeSessionId, code: e && e.code || null, name: e && e.name || null, msg: (e && e.message || '').slice(0,200) }); } catch {}
                     console.warn(`[agentClient] subscribeServerEvents error opencodeSessionId=${opencodeSessionId} code=${e && e.code} name=${e && e.name} msg=${(e && e.message || '').slice(0,120)}`);
                     if (e && (e.code === 'ABORTED' || e.code === 'TIMEOUT' || e.code === ERR_AUTH || e.code === ERR_UPSTREAM)) {
                         finishReject(e);

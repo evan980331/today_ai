@@ -135,7 +135,7 @@ class RemoteWorkerClient {
         let timedOut = false;
         const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
         if (timer.unref) timer.unref();
-        const onCallerAbort = () => { console.warn(`[remoteWorker] caller signal abort -> ctrl abort workerId=${workerId}`); ctrl.abort(); };
+        const onCallerAbort = () => { try { require('../utils/workerDebugLog').log('remoteWorker', 'caller-abort', { workerId }); } catch {}; console.warn(`[remoteWorker] caller signal abort -> ctrl abort workerId=${workerId}`); ctrl.abort(); };
         if (signal) {
             if (signal.aborted) {
                 clearTimeout(timer);
@@ -144,6 +144,7 @@ class RemoteWorkerClient {
             }
             signal.addEventListener('abort', onCallerAbort, { once: true });
         }
+        try { require('../utils/workerDebugLog').log('remoteWorker', 'fetch-start', { workerId, path: `/workers/${workerId}/execute/stream` }); } catch {}
         console.warn(`[remoteWorker] fetch POST ${this.baseUrl}/workers/${workerId}/execute/stream`);
         try {
             const res = await fetch(`${this.baseUrl}/workers/${encodeURIComponent(workerId)}/execute/stream`, {
@@ -191,6 +192,7 @@ class RemoteWorkerClient {
             }
             throw workerError('WORKER_ERROR', 'Worker stream ended without terminal event');
         } catch (e) {
+            try { require('../utils/workerDebugLog').log('remoteWorker', 'executeStream-catch', { workerId, code: e && e.code || null, name: e && e.name || null, timedOut, signalAborted: !!(signal && signal.aborted), msg: (e && e.message || '').slice(0,200) }); } catch {}
             console.warn(`[remoteWorker] executeStream catch code=${e && e.code} name=${e && e.name} timedOut=${timedOut} signalAborted=${signal && signal.aborted} msg=${(e && e.message || '').slice(0,120)}`);
             if (e && (e.code === 'ABORTED' || e.code === 'WORKER_AUTH' || e.code === 'WORKER_NOT_FOUND' ||
                 e.code === 'WORKER_BUSY' || e.code === 'WORKER_RATE_LIMITED' || e.code === 'WORKER_ERROR' ||

@@ -13,6 +13,8 @@ const orchestrator = require('../services/agentOrchestrator');
 const { tryAcquire, release } = require('../services/executionLock');
 
 const router = express.Router();
+function safeString(v, max = 200) { try { return v == null ? null : String(v).slice(0, max); } catch { return null; } }
+function safeCode(e) { try { return e && typeof e.code === 'string' ? e.code : null; } catch { return null; } }
 
 function sseSend(res, event, data) {
     // data must be a plain object: never cookie, password or token.
@@ -79,9 +81,12 @@ router.post('/chat/stream', chatLimiter, async (req, res) => {
     // withWorker (linked signal below) stops the worker afterwards.
     res.on('close', () => {
         if (!finished && !res.writableEnded) {
+            try { require('../utils/workerDebugLog').log('stream', 'res-close-abort', { sessionId, agentSessionId, finished, writableEnded: res.writableEnded, destroyed: res.destroyed, socketDestroyed: req.socket?.destroyed, signalAborted: controller.signal.aborted }); } catch {}
             console.warn(`[stream] res close -> abort signal (finished=${finished})`);
             try { controller.abort(); } catch {}
             finish('cancelled');
+        } else {
+            try { require('../utils/workerDebugLog').log('stream', 'res-close-ignored', { sessionId, agentSessionId, finished, writableEnded: res.writableEnded, destroyed: res.destroyed, socketDestroyed: req.socket?.destroyed }); } catch {}
         }
     });
 
@@ -120,6 +125,7 @@ router.post('/chat/stream', chatLimiter, async (req, res) => {
             res.end();
         }
     } catch (err) {
+        try { require('../utils/workerDebugLog').log('stream', 'catch', { sessionId, agentSessionId, code: safeCode(err), name: err && err.name || null, msg: safeString(err && err.message, 200), signalAborted: controller.signal.aborted, finished, writableEnded: res.writableEnded }); } catch {}
         const isAbort = err.code === 'ABORTED';
         const isTimeout = err.code === 'TIMEOUT';
         const isUnavailable = err.code === 'RUNTIME_UNAVAILABLE' || err.code === 'MOCK_FORBIDDEN' ||
