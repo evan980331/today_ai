@@ -22,7 +22,17 @@ router.get('/health', async (req, res) => {
     try {
         runtime = require('../services/opencodeRuntime').describe();
     } catch {}
-    res.json({ status: 'ok', mcp, db, runtime, uptime: process.uptime() });
+    // TEMPORARY diagnostic: prove that the live function's worker secret equals the dashboard's.
+    // Truncated SHA-256 (8+4 hex chars) — not reversible, never raw value, never header.
+    let workerSecretFingerprint = null;
+    try {
+        const s = process.env.WORKER_SHARED_SECRET || '';
+        if (s) {
+            const crypto = require('crypto');
+            workerSecretFingerprint = `${crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 8)}...${crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(-4)}`;
+        }
+    } catch {}
+    res.json({ status: 'ok', mcp, db, runtime, workerSecretFingerprint, uptime: process.uptime() });
 });
 
 module.exports = router;
