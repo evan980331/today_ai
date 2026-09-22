@@ -79,6 +79,7 @@ router.post('/chat/stream', chatLimiter, async (req, res) => {
     // withWorker (linked signal below) stops the worker afterwards.
     res.on('close', () => {
         if (!finished && !res.writableEnded) {
+            console.warn(`[stream] res close -> abort signal (finished=${finished})`);
             try { controller.abort(); } catch {}
             finish('cancelled');
         }

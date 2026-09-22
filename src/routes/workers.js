@@ -224,6 +224,7 @@ router.post('/workers/:id/execute/stream', async (req, res) => {
         // client disconnect. Disconnect is res 'close' with !writableEnded.
         res.on('close', () => {
             if (!ended && !res.writableEnded) {
+                console.warn(`[workers] res close -> abort workerId=${id} ended=${ended}`);
                 ended = true;
                 try { controller.abort(); } catch {}
                 inflight.delete(id);
