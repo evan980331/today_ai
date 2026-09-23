@@ -5,4 +5,6 @@ node_modules/
 .opencode/
 .cloudflared/
 tunnel-config.yml
+# Google OAuth credentials file for MCP (Desktop-app JSON, never commit)
+gcp-oauth.keys.json
 

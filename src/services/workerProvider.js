@@ -103,10 +103,23 @@ function useRemoteWorker() {
     return !!(process.env.WORKER_URL && process.env.WORKER_SHARED_SECRET);
 }
 
+function remoteWorkerUnavailableError() {
+    const hasUrl = !!(process.env.WORKER_URL && process.env.WORKER_URL.trim());
+    const hasSecret = !!(process.env.WORKER_SHARED_SECRET && process.env.WORKER_SHARED_SECRET.trim());
+    const msg = (hasUrl || hasSecret)
+        ? 'Remote Worker misconfigured: WORKER_URL and WORKER_SHARED_SECRET must both be set'
+        : 'Remote Worker is not configured';
+    const err = new Error(msg);
+    err.code = 'RUNTIME_UNAVAILABLE';
+    err.status = 503;
+    return err;
+}
+
 // One-shot prompt execution for routes. Local path reuses withWorker()
 // (workspace lifecycle + mock support). Remote path proxies one execution
 // through the worker API (create -> execute -> destroy in finally).
 // Returns { result, mcpTools } in both cases.
+// Production never falls back to local withWorker — that would spawn OpenCode on Vercel.
 async function executePrompt({ prompt, workspaceId = null, sessionId = null, signal = null, timeoutMs = 600000 } = {}) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
         throw Object.assign(new Error('prompt is required'), { status: 400 });
@@ -120,6 +133,9 @@ async function executePrompt({ prompt, workspaceId = null, sessionId = null, sig
         } finally {
             await client.destroy(w.workerId).catch(() => {});
         }
+    }
+    if (process.env.NODE_ENV === 'production') {
+        throw remoteWorkerUnavailableError();
     }
     const agentWorker = require('./agentWorker');
     return agentWorker.withWorker({ workspaceId, signal }, async (client) =>

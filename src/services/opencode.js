@@ -7,6 +7,7 @@ const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || '';
 const MCP_TIMEOUT_MS = parseInt(process.env.MCP_TIMEOUT_MS) || 60000;
 
 function getOpencodeCmd() {
+    if (process.env.OPENCODE_PATH && process.env.OPENCODE_PATH.trim()) return process.env.OPENCODE_PATH.trim();
     return 'opencode';
 }
 
@@ -273,6 +274,10 @@ function buildArgs(prompt, { formatJson = false, useAttach = false, serverUrl = 
 // the agent never runs in the Today AI repository root.
 function spawnOpencode(args, cwd) {
     const dir = cwd || PROJECT_ROOT;
+    const custom = process.env.OPENCODE_PATH && process.env.OPENCODE_PATH.trim();
+    if (custom) {
+        return spawn(custom, args, { cwd: dir, env: process.env, windowsHide: true });
+    }
     const isWin = process.platform === 'win32';
     if (isWin) {
         return spawn('powershell.exe', ['-NoProfile', '-Command', `opencode ${args.map(a => a.includes(' ') ? `"${a.replace(/"/g, '""')}"` : a).join(' ')}`], {

@@ -51,6 +51,14 @@ function resolveInWorkspace(id, subPath = '.') {
 async function createWorkspace(id) {
     const dir = getWorkspacePath(id);
     await fs.promises.mkdir(dir, { recursive: true });
+    // Each worker workspace owns its OpenCode config (mcp section only,
+    // secrets stay in process env) so `opencode serve` started with
+    // cwd=workspace can discover MCP servers.
+    try {
+        require('./workerMcpConfig').ensureWorkerOpenCodeConfig(dir);
+    } catch (e) {
+        console.warn(`[Workspace] could not write worker opencode.json: ${(e && e.message) || e}`);
+    }
     return dir;
 }
 

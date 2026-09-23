@@ -152,10 +152,17 @@ describe('P0.5 process startup + health + auth + cwd', () => {
             assert.deepEqual(created[0].spawnArgs.slice(0, 4), ['serve', '--hostname', '127.0.0.1', '--port']);
             assert.equal(created[0].spawnOpts.cwd, w.workspacePath);
             assert.equal(created[0].spawnOpts.env.OPENCODE_SERVER_PASSWORD.length, 48);
+            assert.equal(created[0].spawnOpts.env.OPENCODE_SERVER_USERNAME, 'worker');
+            // execute must use identical credentials
+            const expectedAuth = 'Basic ' + Buffer.from(`worker:${created[0].spawnOpts.env.OPENCODE_SERVER_PASSWORD}`).toString('base64');
             assert.ok(seen.length >= 1, 'health probe must hit the server');
-            assert.ok(String(seen[0].auth || '').startsWith('Basic '), 'probe must use Basic auth');
+            assert.equal(String(seen[0].auth || ''), expectedAuth, 'probe must use worker username/password');
             const h = await workerSvc.healthWorker(w.workerId);
             assert.equal(h.status, 'ready');
+            // public view must never leak credentials
+            const pub = workerSvc.getWorker(w.workerId);
+            assert.ok(!('password' in pub));
+            assert.ok(JSON.stringify(pub).indexOf(created[0].spawnOpts.env.OPENCODE_SERVER_PASSWORD) === -1);
         } finally {
             OpenCodeClient.prototype.health = origHealth;
             await workerSvc.cleanupWorker(w.workerId).catch(() => {});

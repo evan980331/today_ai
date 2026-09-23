@@ -18,21 +18,17 @@
     },
     "google-calendar": {
       "type": "local",
-      "command": ["npx", "-y", "@mcp/google-calendar-server"],
+      "command": ["npx", "-y", "@cocal/google-calendar-mcp"],
       "environment": {
-        "CLIENT_ID": "{env:GOOGLE_CLIENT_ID}",
-        "CLIENT_SECRET": "{env:GOOGLE_CLIENT_SECRET}",
-        "REFRESH_TOKEN": "{env:GOOGLE_REFRESH_TOKEN}"
+        "GOOGLE_OAUTH_CREDENTIALS": "{env:GOOGLE_OAUTH_CREDENTIALS}"
       },
       "enabled": true
     },
     "gmail": {
       "type": "local",
-      "command": ["npx", "-y", "@mcp/gmail-server"],
+      "command": ["npx", "-y", "@klodr/gmail-mcp"],
       "environment": {
-        "CLIENT_ID": "{env:GOOGLE_CLIENT_ID}",
-        "CLIENT_SECRET": "{env:GOOGLE_CLIENT_SECRET}",
-        "REFRESH_TOKEN": "{env:GOOGLE_REFRESH_TOKEN}"
+        "GMAIL_OAUTH_PATH": "{env:GMAIL_OAUTH_PATH}"
       },
       "enabled": true
     }

@@ -108,9 +108,27 @@ function usePrompt(text) {
 }
 window.usePrompt = usePrompt;
 
-let currentStreamController = null;
+function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('sidebar-overlay');
+    const isHidden = sb.classList.contains('hidden');
+    const isTranslated = sb.classList.contains('-translate-x-full');
+    if (isHidden || isTranslated) {
+        sb.classList.remove('hidden');
+        // force reflow then slide in
+        void sb.offsetWidth;
+        sb.classList.remove('-translate-x-full');
+        ov.classList.remove('hidden');
+    } else {
+        sb.classList.add('-translate-x-full');
+        ov.classList.add('hidden');
+        setTimeout(() => { if (sb.classList.contains('-translate-x-full')) sb.classList.add('hidden'); }, 200);
+    }
+    lucide.createIcons();
+}
+window.toggleSidebar = toggleSidebar;
 
-async function sendMessage() {
+let currentStreamController = null;
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 8000) {
@@ -143,6 +161,59 @@ async function sendMessageStream(text, loadingId) {
     let bubble = null;
     let fullText = '';
     let handled = false;
+    // P1-1 activity state: dedupe by callId/partId
+    let activityBox = null;
+    let activityList = null;
+    const activityMap = new Map();
+    function ensureActivityBox() {
+        if (activityBox) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'flex space-x-3 justify-start';
+        const icon = document.createElement('div');
+        icon.className = 'w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center font-bold text-xs text-slate-400 shrink-0 mt-1';
+        icon.innerHTML = '<i data-lucide="loader-circle" class="w-4 h-4 animate-spin"></i>';
+        try { if (window.lucide) lucide.createIcons({ nodes: [icon] }); } catch {}
+        activityBox = document.createElement('div');
+        activityBox.className = 'bg-slate-900/60 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-400 max-w-xl w-full leading-relaxed shadow-sm space-y-1 overflow-hidden';
+        activityBox.innerHTML = '<div class="flex items-center gap-2 text-[11px] tracking-wider text-slate-500 uppercase"><span class="w-2 h-2 rounded-full bg-amber-400/60 animate-pulse shrink-0"></span>背景活動</div>';
+        activityList = document.createElement('div');
+        activityList.className = 'space-y-1 pt-1';
+        activityBox.appendChild(activityList);
+        wrap.appendChild(icon);
+        wrap.appendChild(activityBox);
+        messagesDiv.appendChild(wrap);
+        activityBox._wrap = wrap;
+    }
+    function upsertActivity(obj) {
+        const key = obj.callId || obj.partId || obj.tool || JSON.stringify(obj).slice(0,80);
+        if (activityMap.has(key)) {
+            const el = activityMap.get(key);
+            el.textContent = formatActivity(obj);
+            return;
+        }
+        ensureActivityBox();
+        const el = document.createElement('div');
+        el.className = 'flex items-start gap-2 text-xs text-slate-400 break-words';
+        el.style.overflowWrap = 'anywhere';
+        el.dataset.key = key;
+        el.textContent = formatActivity(obj);
+        activityList.appendChild(el);
+        activityMap.set(key, el);
+        scrollToBottom();
+    }
+    function formatActivity(o) {
+        const t = (o.tool || o.type || 'tool').toLowerCase();
+        const id = o.callId ? ` · ${o.callId.slice(0,8)}` : '';
+        if (o.type === 'tool.completed') return `✓ ${t}${id}`;
+        return `▸ ${t}${id}`;
+    }
+    function finalizeActivity() {
+        if (!activityBox) return;
+        const header = activityBox.querySelector('div');
+        if (header) header.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400/60 shrink-0 inline-block"></span> 已完成 · ' + activityMap.size + ' 項活動';
+        // keep as history, slightly dim
+        activityBox.classList.add('opacity-80');
+    }
     try {
         const res = await fetch('/api/chat/stream', {
             method: 'POST',
@@ -184,11 +255,15 @@ async function sendMessageStream(text, loadingId) {
                     if (!bubble) bubble = appendStreamingMessage();
                     bubble.textContent = fullText;
                     scrollToBottom();
+                } else if (ev === 'tool.started' || ev === 'tool.completed' || ev === 'command.started' || ev === 'command.completed') {
+                    upsertActivity(obj);
                 } else if (ev === 'message.completed' || ev === 'done') {
+                    finalizeActivity();
                     if (!bubble && fullText) bubble = appendStreamingMessage();
                     if (bubble) bubble.textContent = fullText || bubble.textContent;
                     loadSessions();
                 } else if (ev === 'error') {
+                    finalizeActivity();
                     if (!bubble) bubble = appendStreamingMessage();
                     bubble.textContent = `錯誤：${obj.message || '未知錯誤'}`;
                 }
@@ -271,12 +346,13 @@ window.sendMessage = sendMessage;
 // text node so chunks can update it incrementally (textContent = XSS-safe).
 function appendStreamingMessage() {
     const wrapper = document.createElement('div');
-    wrapper.className = 'flex space-x-3 justify-start';
+    wrapper.className = 'flex space-x-3 justify-start min-w-0';
     const icon = document.createElement('div');
     icon.className = 'w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1';
     icon.textContent = 'T';
     const bubble = document.createElement('div');
-    bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-xl leading-relaxed shadow-md whitespace-pre-wrap';
+    bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-[min(36rem,85vw)] md:max-w-xl leading-relaxed shadow-md whitespace-pre-wrap break-words overflow-wrap-anywhere min-w-0';
+    bubble.style.overflowWrap = 'anywhere';
     bubble.textContent = '';
     wrapper.appendChild(icon);
     wrapper.appendChild(bubble);
@@ -287,10 +363,11 @@ function appendStreamingMessage() {
 
 function appendMessage(role, content) {
     const wrapper = document.createElement('div');
-    wrapper.className = `flex space-x-3 ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+    wrapper.className = `flex space-x-3 ${role === 'user' ? 'justify-end' : 'justify-start'} min-w-0`;
     if (role === 'user') {
         const div = document.createElement('div');
-        div.className = 'bg-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 text-sm max-w-lg shadow-md whitespace-pre-wrap';
+        div.className = 'bg-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 text-sm max-w-[min(28rem,85vw)] md:max-w-lg shadow-md whitespace-pre-wrap break-words min-w-0';
+        div.style.overflowWrap = 'anywhere';
         div.textContent = content;
         wrapper.appendChild(div);
     } else {
@@ -298,7 +375,8 @@ function appendMessage(role, content) {
         icon.className = 'w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1';
         icon.textContent = 'T';
         const bubble = document.createElement('div');
-        bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-xl leading-relaxed shadow-md whitespace-pre-wrap';
+        bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-[min(36rem,85vw)] md:max-w-xl leading-relaxed shadow-md whitespace-pre-wrap break-words min-w-0';
+        bubble.style.overflowWrap = 'anywhere';
         bubble.textContent = content;
         wrapper.appendChild(icon);
         wrapper.appendChild(bubble);
