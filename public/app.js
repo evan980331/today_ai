@@ -1,3 +1,7 @@
+// Early stubs so inline onclick never sees undefined even if later init throws
+window.toggleSidebar = function() { console.warn('toggleSidebar stub called before init'); };
+window.sendMessage = function() { console.warn('sendMessage stub called before init'); };
+window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
 try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
 try {
 const _cd = document.getElementById('current-date');
@@ -97,12 +101,15 @@ const messagesDiv = document.getElementById('messages');
 const welcomeSection = document.getElementById('welcome-section');
 const sessionListEl = document.getElementById('session-list');
 
-input.addEventListener('keydown', (e) => {
+try {
+if (input) input.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        sendMessage();
+        window.sendMessage();
     }
 });
+} catch {}
 
 function usePrompt(text) {
     input.value = text;
