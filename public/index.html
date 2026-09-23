@@ -2,7 +2,7 @@
 <html lang="zh-TW" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Today AI - OpenCode Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
@@ -23,6 +23,12 @@
         html, body { overflow-x: hidden; }
         pre, code { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; }
         #chat-container::-webkit-scrollbar { width: 6px; }
+        /* 禁止 double-tap zoom 但保留 pinch zoom */
+        button, a, [onclick] { touch-action: manipulation; }
+        /* 防止 iOS 鍵盤聚焦自動放大：input 需 >=16px */
+        @media (max-width: 768px) {
+            #user-input, #login-username, #login-password { font-size: 16px !important; }
+        }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 font-sans flex overflow-hidden" style="height:100dvh; height:100vh; min-height:0">
@@ -52,7 +58,7 @@
     </div>
 
     <!-- 手機遮罩 -->
-    <div id="sidebar-overlay" class="fixed inset-0 bg-black/50 z-30 hidden md:hidden" onclick="toggleSidebar()"></div>
+    <div id="sidebar-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="toggleSidebar()"></div>
     <!-- 側邊欄 -->
     <aside id="sidebar" class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4 hidden md:flex fixed md:static inset-y-0 left-0 z-40 transform -translate-x-full md:translate-x-0 transition-transform duration-200 overflow-y-auto">
         <div>
@@ -143,7 +149,7 @@
                 <div class="flex items-center justify-between pt-2 border-t border-slate-800/50 px-2 gap-2">
                     <span class="text-xs text-slate-500 hidden sm:inline">提示：Enter 發送，Shift+Enter 換行</span>
                     <span class="text-xs text-slate-500 sm:hidden">Enter 發送</span>
-                    <button onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-xl transition flex items-center justify-center shrink-0 min-w-[44px] min-h-[44px]">
+                    <button type="button" onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-xl transition flex items-center justify-center shrink-0 min-w-[44px] min-h-[44px] touch-manipulation">
                         <i data-lucide="arrow-up" class="w-4 h-4"></i>
                     </button>
                 </div>

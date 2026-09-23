@@ -111,20 +111,28 @@ window.usePrompt = usePrompt;
 function toggleSidebar() {
     const sb = document.getElementById('sidebar');
     const ov = document.getElementById('sidebar-overlay');
+    if (!sb || !ov) return;
     const isHidden = sb.classList.contains('hidden');
     const isTranslated = sb.classList.contains('-translate-x-full');
-    if (isHidden || isTranslated) {
+    const isClosed = isHidden || isTranslated;
+    if (isClosed) {
         sb.classList.remove('hidden');
-        // force reflow then slide in
+        sb.classList.add('flex');
         void sb.offsetWidth;
         sb.classList.remove('-translate-x-full');
         ov.classList.remove('hidden');
     } else {
         sb.classList.add('-translate-x-full');
         ov.classList.add('hidden');
-        setTimeout(() => { if (sb.classList.contains('-translate-x-full')) sb.classList.add('hidden'); }, 200);
+        setTimeout(() => {
+            const stillClosed = sb.classList.contains('-translate-x-full');
+            if (stillClosed) {
+                sb.classList.add('hidden');
+                sb.classList.remove('flex');
+            }
+        }, 220);
     }
-    lucide.createIcons();
+    try { if (window.lucide) lucide.createIcons(); } catch {}
 }
 window.toggleSidebar = toggleSidebar;
 
