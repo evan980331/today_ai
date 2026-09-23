@@ -4,6 +4,7 @@ window.sendMessage = function() { console.warn('sendMessage stub called before i
 window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
 window.toggleSidebar = toggleSidebar;
 window.sendMessage = sendMessage;
+try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
 function toggleSidebar() {
     const sb = document.getElementById('sidebar');
     const ov = document.getElementById('sidebar-overlay');
