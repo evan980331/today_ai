@@ -10,7 +10,9 @@ if (_cd) _cd.innerText = new Date().toLocaleDateString('zh-TW', {
 });
 } catch {}
 
-let currentSessionId = (() => {
+let currentSessionId;
+try {
+currentSessionId = (() => {
     const v = localStorage.getItem('todayai_session');
     // Validate stored sessionId is UUID or safe
     if (v && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)) return v;
@@ -110,6 +112,7 @@ if (input) input.addEventListener('keydown', (e) => {
     }
 });
 } catch {}
+} catch(e) { console.warn('init error', e); }
 
 function usePrompt(text) {
     input.value = text;
