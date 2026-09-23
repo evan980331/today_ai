@@ -1,10 +1,3 @@
-// Early stubs so inline onclick never sees undefined even if later init throws
-window.toggleSidebar = function() { console.warn('toggleSidebar stub called before init'); };
-window.sendMessage = function() { console.warn('sendMessage stub called before init'); };
-window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
-window.toggleSidebar = toggleSidebar;
-window.sendMessage = sendMessage;
-try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
 function toggleSidebar() {
     const sb = document.getElementById('sidebar');
     const ov = document.getElementById('sidebar-overlay');
@@ -32,154 +25,6 @@ function toggleSidebar() {
     try { if (window.lucide) lucide.createIcons(); } catch {}
 }
 window.toggleSidebar = toggleSidebar;
-try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
-try {
-const _cd = document.getElementById('current-date');
-if (_cd) _cd.innerText = new Date().toLocaleDateString('zh-TW', {
-    year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
-});
-} catch {}
-
-let currentSessionId;
-try {
-currentSessionId = (() => {
-    const v = localStorage.getItem('todayai_session');
-    // Validate stored sessionId is UUID or safe
-    if (v && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)) return v;
-    if (v && /^[a-zA-Z0-9._\-]{1,128}$/.test(v)) return v;
-    const id = crypto.randomUUID();
-    localStorage.setItem('todayai_session', id);
-    return id;
-})();
-if (!localStorage.getItem('todayai_session')) localStorage.setItem('todayai_session', currentSessionId);
-} catch(e) { console.warn('init error', e); }
-
-// --- Auth (Cookie Session, HttpOnly) ---
-const loginOverlay = document.getElementById('login-overlay');
-const loginUserEl = document.getElementById('login-username');
-const loginPassEl = document.getElementById('login-password');
-const loginErrorEl = document.getElementById('login-error');
-
-async function checkAuth() {
-    try {
-        const res = await fetch('/api/auth/me', { credentials: 'include' });
-        if (res.ok) {
-            loginOverlay.classList.add('hidden');
-            return true;
-        }
-    } catch {}
-    loginOverlay.classList.remove('hidden');
-    return false;
-}
-
-async function doLogin() {
-    const username = (loginUserEl.value || '').trim();
-    const password = loginPassEl.value || '';
-    loginErrorEl.classList.add('hidden');
-    if (!username || !password) {
-        loginErrorEl.textContent = '請輸入帳號與密碼';
-        loginErrorEl.classList.remove('hidden');
-        return;
-    }
-    try {
-        const res = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ username, password })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            loginErrorEl.textContent = res.status === 429 ? '登入過於頻繁，請稍後再試' : '帳號或密碼錯誤';
-            loginErrorEl.classList.remove('hidden');
-            return;
-        }
-        loginPassEl.value = '';
-        loginOverlay.classList.add('hidden');
-        // Verify session
-        const me = await fetch('/api/auth/me', { credentials: 'include' });
-        if (me.ok) {
-            loadHistory();
-            loadSessions();
-        }
-    } catch (e) {
-        loginErrorEl.textContent = '連線失敗';
-        loginErrorEl.classList.remove('hidden');
-    }
-}
-window.doLogin = doLogin;
-
-async function doLogout() {
-    try {
-        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-    } catch {}
-    // Clear UI state but not password
-    messagesDiv.innerHTML = '';
-    welcomeSection.classList.remove('hidden');
-    loginOverlay.classList.remove('hidden');
-    loginUserEl.value = '';
-    loginPassEl.value = '';
-}
-window.doLogout = doLogout;
-
-// Allow Enter on login inputs
-if (loginUserEl && loginPassEl) {
-    [loginUserEl, loginPassEl].forEach(el => el.addEventListener('keydown', e => {
-        if (e.key === 'Enter') doLogin();
-    }));
-}
-
-const input = document.getElementById('user-input');
-const messagesDiv = document.getElementById('messages');
-const welcomeSection = document.getElementById('welcome-section');
-const sessionListEl = document.getElementById('session-list');
-
-try {
-if (input) input.addEventListener('keydown', (e) => {
-    if (e.isComposing) return;
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        window.sendMessage();
-    }
-});
-} catch {}
-
-function usePrompt(text) {
-    input.value = text;
-    sendMessage();
-}
-window.usePrompt = usePrompt;
-
-function toggleSidebar() {
-    const sb = document.getElementById('sidebar');
-    const ov = document.getElementById('sidebar-overlay');
-    if (!sb || !ov) return;
-    const isHidden = sb.classList.contains('hidden');
-    const isTranslated = sb.classList.contains('-translate-x-full');
-    const isClosed = isHidden || isTranslated;
-    if (isClosed) {
-        sb.classList.remove('hidden');
-        sb.classList.add('flex');
-        void sb.offsetWidth;
-        sb.classList.remove('-translate-x-full');
-        ov.classList.remove('hidden');
-    } else {
-        sb.classList.add('-translate-x-full');
-        ov.classList.add('hidden');
-        setTimeout(() => {
-            const stillClosed = sb.classList.contains('-translate-x-full');
-            if (stillClosed) {
-                sb.classList.add('hidden');
-                sb.classList.remove('flex');
-            }
-        }, 220);
-    }
-    try { if (window.lucide) lucide.createIcons(); } catch {}
-}
-window.toggleSidebar = toggleSidebar;
-
-let currentStreamController = null;
-
 async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
@@ -393,6 +238,158 @@ async function sendMessageLegacy(text, loadingId) {
     }
 }
 window.sendMessage = sendMessage;
+window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
+try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
+
+try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
+try {
+const _cd = document.getElementById('current-date');
+if (_cd) _cd.innerText = new Date().toLocaleDateString('zh-TW', {
+    year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
+});
+} catch {}
+
+let currentSessionId;
+try {
+currentSessionId = (() => {
+    const v = localStorage.getItem('todayai_session');
+    // Validate stored sessionId is UUID or safe
+    if (v && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)) return v;
+    if (v && /^[a-zA-Z0-9._\-]{1,128}$/.test(v)) return v;
+    const id = crypto.randomUUID();
+    localStorage.setItem('todayai_session', id);
+    return id;
+})();
+if (!localStorage.getItem('todayai_session')) localStorage.setItem('todayai_session', currentSessionId);
+} catch(e) { console.warn('init error', e); }
+
+// --- Auth (Cookie Session, HttpOnly) ---
+const loginOverlay = document.getElementById('login-overlay');
+const loginUserEl = document.getElementById('login-username');
+const loginPassEl = document.getElementById('login-password');
+const loginErrorEl = document.getElementById('login-error');
+
+async function checkAuth() {
+    try {
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        if (res.ok) {
+            loginOverlay.classList.add('hidden');
+            return true;
+        }
+    } catch {}
+    loginOverlay.classList.remove('hidden');
+    return false;
+}
+
+async function doLogin() {
+    const username = (loginUserEl.value || '').trim();
+    const password = loginPassEl.value || '';
+    loginErrorEl.classList.add('hidden');
+    if (!username || !password) {
+        loginErrorEl.textContent = '請輸入帳號與密碼';
+        loginErrorEl.classList.remove('hidden');
+        return;
+    }
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            loginErrorEl.textContent = res.status === 429 ? '登入過於頻繁，請稍後再試' : '帳號或密碼錯誤';
+            loginErrorEl.classList.remove('hidden');
+            return;
+        }
+        loginPassEl.value = '';
+        loginOverlay.classList.add('hidden');
+        // Verify session
+        const me = await fetch('/api/auth/me', { credentials: 'include' });
+        if (me.ok) {
+            loadHistory();
+            loadSessions();
+        }
+    } catch (e) {
+        loginErrorEl.textContent = '連線失敗';
+        loginErrorEl.classList.remove('hidden');
+    }
+}
+window.doLogin = doLogin;
+
+async function doLogout() {
+    try {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
+    // Clear UI state but not password
+    messagesDiv.innerHTML = '';
+    welcomeSection.classList.remove('hidden');
+    loginOverlay.classList.remove('hidden');
+    loginUserEl.value = '';
+    loginPassEl.value = '';
+}
+window.doLogout = doLogout;
+
+// Allow Enter on login inputs
+if (loginUserEl && loginPassEl) {
+    [loginUserEl, loginPassEl].forEach(el => el.addEventListener('keydown', e => {
+        if (e.key === 'Enter') doLogin();
+    }));
+}
+
+const input = document.getElementById('user-input');
+const messagesDiv = document.getElementById('messages');
+const welcomeSection = document.getElementById('welcome-section');
+const sessionListEl = document.getElementById('session-list');
+
+try {
+if (input) input.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        window.sendMessage();
+    }
+});
+} catch {}
+
+function usePrompt(text) {
+    input.value = text;
+    sendMessage();
+}
+window.usePrompt = usePrompt;
+
+function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('sidebar-overlay');
+    if (!sb || !ov) return;
+    const isHidden = sb.classList.contains('hidden');
+    const isTranslated = sb.classList.contains('-translate-x-full');
+    const isClosed = isHidden || isTranslated;
+    if (isClosed) {
+        sb.classList.remove('hidden');
+        sb.classList.add('flex');
+        void sb.offsetWidth;
+        sb.classList.remove('-translate-x-full');
+        ov.classList.remove('hidden');
+    } else {
+        sb.classList.add('-translate-x-full');
+        ov.classList.add('hidden');
+        setTimeout(() => {
+            const stillClosed = sb.classList.contains('-translate-x-full');
+            if (stillClosed) {
+                sb.classList.add('hidden');
+                sb.classList.remove('flex');
+            }
+        }, 220);
+    }
+    try { if (window.lucide) lucide.createIcons(); } catch {}
+}
+window.toggleSidebar = toggleSidebar;
+
+let currentStreamController = null;
+
+
 
 // Streaming AI bubble: same styling as appendMessage('ai'), but returns the
 // text node so chunks can update it incrementally (textContent = XSS-safe).
