@@ -2,6 +2,35 @@
 window.toggleSidebar = function() { console.warn('toggleSidebar stub called before init'); };
 window.sendMessage = function() { console.warn('sendMessage stub called before init'); };
 window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
+window.toggleSidebar = toggleSidebar;
+window.sendMessage = sendMessage;
+function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('sidebar-overlay');
+    if (!sb || !ov) return;
+    const isHidden = sb.classList.contains('hidden');
+    const isTranslated = sb.classList.contains('-translate-x-full');
+    const isClosed = isHidden || isTranslated;
+    if (isClosed) {
+        sb.classList.remove('hidden');
+        sb.classList.add('flex');
+        void sb.offsetWidth;
+        sb.classList.remove('-translate-x-full');
+        ov.classList.remove('hidden');
+    } else {
+        sb.classList.add('-translate-x-full');
+        ov.classList.add('hidden');
+        setTimeout(() => {
+            const stillClosed = sb.classList.contains('-translate-x-full');
+            if (stillClosed) {
+                sb.classList.add('hidden');
+                sb.classList.remove('flex');
+            }
+        }, 220);
+    }
+    try { if (window.lucide) lucide.createIcons(); } catch {}
+}
+window.toggleSidebar = toggleSidebar;
 try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
 try {
 const _cd = document.getElementById('current-date');
