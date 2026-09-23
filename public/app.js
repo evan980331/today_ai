@@ -22,6 +22,7 @@ currentSessionId = (() => {
     return id;
 })();
 if (!localStorage.getItem('todayai_session')) localStorage.setItem('todayai_session', currentSessionId);
+} catch(e) { console.warn('init error', e); }
 
 // --- Auth (Cookie Session, HttpOnly) ---
 const loginOverlay = document.getElementById('login-overlay');
@@ -112,7 +113,6 @@ if (input) input.addEventListener('keydown', (e) => {
     }
 });
 } catch {}
-} catch(e) { console.warn('init error', e); }
 
 function usePrompt(text) {
     input.value = text;
