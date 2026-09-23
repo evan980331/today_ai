@@ -146,6 +146,8 @@ function toggleSidebar() {
 window.toggleSidebar = toggleSidebar;
 
 let currentStreamController = null;
+
+async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 8000) {
