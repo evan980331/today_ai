@@ -1,8 +1,10 @@
-lucide.createIcons();
-
-document.getElementById('current-date').innerText = new Date().toLocaleDateString('zh-TW', {
+try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
+try {
+const _cd = document.getElementById('current-date');
+if (_cd) _cd.innerText = new Date().toLocaleDateString('zh-TW', {
     year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
 });
+} catch {}
 
 let currentSessionId = (() => {
     const v = localStorage.getItem('todayai_session');
