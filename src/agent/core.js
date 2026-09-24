@@ -1,7 +1,10 @@
-// Agent Core — minimal deterministic loop (Phase 1-A).
+// Agent Core — minimal deterministic loop (Phase 1-A, P2-A tool foundation).
 // No LLM, single step, tool first, runtime fallback, single retry.
+// Core knows only contracts: planner steps, ToolRegistry.execute(), runtime
+// interface. It never imports any concrete tool implementation.
 const planner = require('./planner');
 const { AgentState } = require('./state');
+const toolRegistry = require('../services/tools/toolRegistry');
 
 function isRetryable(err) {
     if (!err || typeof err !== 'object') return false;
@@ -32,11 +35,21 @@ async function run(task, opts = {}) {
                 let result;
                 if (step.kind === 'tool') {
                     // Core knows only registry contract: execute(name, input, ctx).
-                    const toolRegistry = require('../services/tools/toolRegistry');
+                    // Per-run execution context: taskId/sessionId/signal/timeout
+                    // plus a logging hook and an approval stub (P2-A contract
+                    // only — no approval system). Never shared across runs.
                     const tool = toolRegistry.get(step.name);
                     if (!tool) throw toolNotFound(step.name);
+                    const toolCtx = {
+                        taskId: task.id || null,
+                        sessionId: task.sessionId || null,
+                        signal: opts.signal || null,
+                        timeoutMs: opts.timeoutMs || null,
+                        logger: opts.logger || null,
+                        approval: { status: 'not_required' }
+                    };
                     try {
-                        result = await toolRegistry.execute(step.name, step.input, { task, step, signal: opts.signal });
+                        result = await toolRegistry.execute(step.name, step.input, toolCtx);
                     } catch (e) {
                         if (e && (e.code === 'TOOL_NOT_FOUND' || e.code === 'ABORTED' || e.code === 'TIMEOUT' || e.status === 400)) throw e;
                         throw Object.assign(new Error(e.message || 'tool execution failed'), { code: 'TOOL_EXECUTION_ERROR', status: e.status || 500 });
