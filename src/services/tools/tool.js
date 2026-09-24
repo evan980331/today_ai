@@ -14,7 +14,7 @@
 //   structural check is enforced here (see validateToolInput); full JSON
 //   Schema validation is a future extension point.
 // - Execution context is created per run via createExecutionContext().
-const NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const NAME_RE = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
 
 function toolError(status, message, extra) {
     return Object.assign(new Error(message), { status }, extra);
@@ -26,7 +26,7 @@ function defineTool(def) {
     }
     const { name, description, execute, inputSchema, readOnly, needsApproval } = def;
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
-        throw toolError(400, 'tool name must match /^[a-z][a-z0-9_-]{0,63}$/');
+        throw toolError(400, 'tool name must match /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/ (namespaced tools use dots, e.g. gmail.search)');
     }
     if (typeof description !== 'string' || !description.trim() || description.length > 500) {
         throw toolError(400, 'tool description must be a non-empty string (max 500)');
