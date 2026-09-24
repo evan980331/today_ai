@@ -14,6 +14,7 @@
 const crypto = require('crypto');
 const { validateAll: validateTools } = require('./tools/toolRegistry');
 const opencodeRuntime = require('./opencodeRuntime');
+const agentCore = require('../agent/core');
 
 const runtimes = new Map([['opencode', opencodeRuntime]]);
 const tasks = new Map(); // id -> task record
@@ -131,14 +132,21 @@ async function runTask(id, { signal = null, timeoutMs = 600000 } = {}) {
     task.startedAt = Date.now();
     try {
         if (!task.prompt) throw taskError(400, 'task has no prompt to run');
-        const out = await runtime.execute({
-            prompt: task.prompt,
-            workspaceId: task.sessionId,
-            sessionId: task.sessionId,
-            tools: task.tools,
-            signal: controller.signal,
-            timeoutMs
-        });
+        // Phase 1-A: use AgentCore when tools are requested, otherwise direct runtime (keeps existing P0 tests green)
+        let out;
+        if (task.tools && task.tools.length > 0) {
+            out = await agentCore.run(task, { signal: controller.signal, timeoutMs });
+        } else {
+            const runtime = selectRuntime(task);
+            out = await runtime.execute({
+                prompt: task.prompt,
+                workspaceId: task.sessionId,
+                sessionId: task.sessionId,
+                tools: task.tools,
+                signal: controller.signal,
+                timeoutMs
+            });
+        }
         const result = typeof out === 'string' ? { result: out, mcpTools: [] } : out;
         setStatus(task, 'completed', { result });
         return result;
@@ -176,15 +184,21 @@ async function streamTask(id, { signal = null, timeoutMs = 600000, onEvent = nul
     task.startedAt = Date.now();
     try {
         if (!task.prompt) throw taskError(400, 'task has no prompt to run');
-        const out = await runtime.executeStream({
-            prompt: task.prompt,
-            workspaceId: task.sessionId,
-            sessionId: task.sessionId,
-            tools: task.tools,
-            signal: controller.signal,
-            timeoutMs,
-            onEvent
-        });
+        let out;
+        if (task.tools && task.tools.length > 0) {
+            out = await agentCore.run(task, { signal: controller.signal, timeoutMs, onEvent });
+        } else {
+            const runtime = selectRuntime(task);
+            out = await runtime.executeStream({
+                prompt: task.prompt,
+                workspaceId: task.sessionId,
+                sessionId: task.sessionId,
+                tools: task.tools,
+                signal: controller.signal,
+                timeoutMs,
+                onEvent
+            });
+        }
         const result = typeof out === 'string' ? { result: out, mcpTools: [] } : out;
         setStatus(task, 'completed', { result });
         return result;

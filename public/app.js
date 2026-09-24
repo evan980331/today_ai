@@ -44,10 +44,21 @@ async function sendMessage() {
     }
 
     const loadingId = appendLoading();
-    const streamed = await sendMessageStream(text, loadingId);
-    if (streamed) return;
-    // Fallback: legacy non-streaming endpoint (kept for compatibility).
-    await sendMessageLegacy(text, loadingId);
+    try {
+        const streamed = await sendMessageStream(text, loadingId);
+        if (streamed) return;
+        // Fallback: legacy non-streaming endpoint (kept for compatibility).
+        await sendMessageLegacy(text, loadingId);
+    } finally {
+        removeLoading(loadingId);
+        try { input.disabled = false; } catch {}
+        // Do not steal focus if user is typing, but ensure input is usable
+        try { if (document.activeElement !== input) input.focus(); } catch {}
+        if (currentStreamController) {
+            try { currentStreamController.abort(); } catch {}
+            currentStreamController = null;
+        }
+    }
 }
 
 // Streaming path: POST /api/chat/stream (SSE). Returns true when the

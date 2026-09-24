@@ -40,8 +40,14 @@ function validateAll(names) {
     return list.slice();
 }
 
+async function execute(name, input, context) {
+    const tool = get(name);
+    if (!tool) throw Object.assign(new Error(`unknown tool: ${name}`), { code: 'TOOL_NOT_FOUND', status: 400 });
+    return tool.execute(input, context);
+}
+
 function _clearForTests() {
     tools.clear();
 }
 
-module.exports = { register, get, has, list, validateAll, _clearForTests };
+module.exports = { register, get, has, list, validateAll, execute, _clearForTests };

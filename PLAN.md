@@ -1,3 +1,12 @@
+# 產品命名決策 (2026-09-23)
+
+- **Today AI**：系統／平台正式名稱（維持不變，不更動 UI／Repo／Domain／package）
+- **Stella**：未來語音互動時使用者對 Agent 的稱呼（非產品更名，靈感：星街彗星《Stellar Stellar》）
+- 定位：`Today AI (平台) └─ Stella (Agent) ─┬─ Orchestrator／Memory／Scheduler／Coding Agent／Gmail／Calendar／未來 Tools`
+- 現階段僅作決策備忘，不實作語音；未來架構須保留此區分。
+
+---
+
 # Today AI P0.9 報告 (2026-09-12, Remote stream 打通)
 
 > `/api/chat/stream` 經同一 `useRemoteWorker()` 切遠端分支：

@@ -1,5 +1,12 @@
 # Today AI — Cloud Coding Agent 平台架構
 
+> 產品名稱：**Today AI**（系統／平台名稱，維持不變）
+> Agent 語音稱呼：**Stella**（未來語音互動時的稱呼，非正式產品更名）
+> 靈感：星街彗星《Stellar Stellar》
+> 定位：Today AI = Personal AI 系統／平台；Stella = 使用者語音稱呼的 Agent
+> 架構：Today AI └─ Stella ─┬─ Agent Orchestrator／Memory／Scheduler／Coding Agent／Gmail／Calendar／未來 Tools
+> 限制：現階段不將 UI／Repo／Domain／package 更名為 Stella，不新增語音功能；此為長期命名決策備忘，未來 Agent 架構需保留此區分。
+
 > 目標：從「本機 Express → spawn OpenCode CLI 的 Bridge」重構成
 > 「可部署到 Linux 雲端、可從手機操作的 Coding Agent 平台」。
 

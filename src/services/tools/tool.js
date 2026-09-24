@@ -12,7 +12,7 @@ function defineTool(def) {
     if (!def || typeof def !== 'object') {
         throw Object.assign(new Error('tool definition must be an object'), { status: 400 });
     }
-    const { name, description, execute } = def;
+    const { name, description, execute, inputSchema, readOnly, needsApproval } = def;
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
         throw Object.assign(new Error('tool name must match /^[a-z][a-z0-9_-]{0,63}$/'), { status: 400 });
     }
@@ -22,7 +22,15 @@ function defineTool(def) {
     if (typeof execute !== 'function') {
         throw Object.assign(new Error(`tool "${name}" must provide execute(input, context)`), { status: 400 });
     }
-    return Object.freeze({ name, description: description.trim(), execute });
+    const tool = {
+        name,
+        description: description.trim(),
+        execute,
+        inputSchema: inputSchema || null,
+        readOnly: !!readOnly,
+        needsApproval: !!needsApproval
+    };
+    return Object.freeze(tool);
 }
 
 module.exports = { defineTool, NAME_RE };
