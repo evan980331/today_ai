@@ -7,4 +7,6 @@ node_modules/
 tunnel-config.yml
 # Google OAuth credentials file for MCP (Desktop-app JSON, never commit)
 gcp-oauth.keys.json
+# P2-B Native Gmail OAuth client JSON (never commit)
+google-oauth-client.json
 
