@@ -64,16 +64,16 @@ describe('P2-B metadata + registration', () => {
             assert.ok(Object.isFrozen(t));
         }
     });
-    it('2 registerNativeTools gives calculator + gmail + calendar + github tools, idempotent', () => {
+    it('2 registerNativeTools gives calculator + gmail + calendar + github + filesystem tools, idempotent', () => {
         const r1 = registerNativeTools(toolRegistry);
-        assert.deepEqual(r1.registered.sort(), ['calculator', 'gmail.getMessage', 'gmail.listThreads', 'gmail.search', 'calendar.listCalendars', 'calendar.listEvents', 'calendar.getEvent', 'github.searchRepositories', 'github.getRepository', 'github.listIssues', 'github.listPullRequests'].sort());
+        assert.deepEqual(r1.registered.sort(), ['calculator', 'gmail.getMessage', 'gmail.listThreads', 'gmail.search', 'calendar.listCalendars', 'calendar.listEvents', 'calendar.getEvent', 'github.searchRepositories', 'github.getRepository', 'github.listIssues', 'github.listPullRequests', 'filesystem.read', 'filesystem.list'].sort());
         assert.deepEqual(NATIVE_TOOL_NAMES.sort(), r1.registered.sort());
-        for (const n of ['calculator', 'gmail.search', 'gmail.getMessage', 'gmail.listThreads', 'calendar.listCalendars', 'calendar.listEvents', 'calendar.getEvent', 'github.searchRepositories', 'github.getRepository', 'github.listIssues', 'github.listPullRequests']) {
+        for (const n of ['calculator', 'gmail.search', 'gmail.getMessage', 'gmail.listThreads', 'calendar.listCalendars', 'calendar.listEvents', 'calendar.getEvent', 'github.searchRepositories', 'github.getRepository', 'github.listIssues', 'github.listPullRequests', 'filesystem.read', 'filesystem.list']) {
             assert.ok(toolRegistry.has(n), n);
         }
         const r2 = registerNativeTools(toolRegistry);
         assert.deepEqual(r2.registered, []);
-        assert.equal(r2.skipped.length, 11);
+        assert.equal(r2.skipped.length, 13);
     });
 });
 

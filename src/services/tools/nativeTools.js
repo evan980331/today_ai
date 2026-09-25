@@ -1,7 +1,8 @@
 // Central Native Tool registration.
 //
 // registerNativeTools(registry) registers every bundled read-only native
-// tool (calculator + gmail.* + calendar.* + github.*) idempotently: already-registered names are
+// tool (calculator + gmail.* + calendar.* + github.* + filesystem.*)
+// idempotently: already-registered names are
 // skipped so tests and future startup wiring can call it safely.
 //
 // The ToolRegistry itself never imports concrete tools (dependency
@@ -12,8 +13,9 @@ const { calculator } = require('./calculator');
 const { gmailSearch, gmailGetMessage, gmailListThreads } = require('./gmail');
 const { calendarListCalendars, calendarListEvents, calendarGetEvent } = require('./calendar');
 const { githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests } = require('./github');
+const { filesystemRead, filesystemList } = require('./filesystem');
 
-const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests];
+const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests, filesystemRead, filesystemList];
 const NATIVE_TOOL_NAMES = NATIVE_TOOLS.map((t) => t.name);
 
 function registerNativeTools(registry) {

@@ -16,6 +16,13 @@ const { loginLimiter } = require('./middleware/rateLimit');
 
 validateEnv();
 
+// Production Native Tools: register the bundled read-only tools
+// (calculator, gmail.*, calendar.*, github.*) into the shared ToolRegistry
+// so Agent Core can serve them via API. Idempotent — safe on warm
+// serverless invocations and re-requires; tests keep isolation via
+// toolRegistry._clearForTests().
+require('./services/tools/nativeTools').registerNativeTools();
+
 const app = express();
 
 // CORS: restrict via ALLOWED_ORIGINS in production, allow all in development
