@@ -89,6 +89,7 @@ function parse(tokens) {
 
 const calculator = defineTool({
     name: 'calculator',
+    capabilities: ['calculation'],
     description: 'Deterministic arithmetic: evaluates + - * / with parentheses',
     inputSchema: { type: 'string', description: 'arithmetic expression, e.g. (2 + 3) * 4' },
     readOnly: true,

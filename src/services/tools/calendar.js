@@ -89,6 +89,7 @@ function pickStartEnd(ev) {
 
 const calendarListCalendars = defineTool({
     name: 'calendar.listCalendars',
+    capabilities: ['calendar.read'],
     description: 'List Google Calendars visible to the user (read-only)',
     inputSchema: {
         type: 'object',
@@ -136,6 +137,7 @@ const calendarListCalendars = defineTool({
 
 const calendarListEvents = defineTool({
     name: 'calendar.listEvents',
+    capabilities: ['calendar.read', 'calendar.search'],
     description: 'List events on a Google Calendar (read-only)',
     inputSchema: {
         type: 'object',
@@ -218,6 +220,7 @@ const calendarListEvents = defineTool({
 
 const calendarGetEvent = defineTool({
     name: 'calendar.getEvent',
+    capabilities: ['calendar.read'],
     description: 'Get a single Google Calendar event by id (read-only)',
     inputSchema: {
         type: 'object',

@@ -25,7 +25,9 @@ function runtimeNotFound(name) {
 async function run(task, opts = {}) {
     if (!task || typeof task !== 'object' || !task.id) throw Object.assign(new Error('task required'), { status: 400 });
     const state = new AgentState(task.id);
-    const steps = planner.plan(task);
+    // Available tool metadata for planner auto selection. Core never
+    // interprets names or implementations — it only forwards metadata.
+    const steps = planner.plan(task, { toolMetadata: toolRegistry.list() });
     let lastError = null;
     for (const step of steps) {
         state.setStep(step);

@@ -86,6 +86,7 @@ function checkOwnerRepo(toolName, obj) {
 
 const githubSearchRepositories = defineTool({
     name: 'github.searchRepositories',
+    capabilities: ['github.read', 'github.search'],
     description: 'Search GitHub repositories (read-only) by query string',
     inputSchema: {
         type: 'object',
@@ -134,6 +135,7 @@ const githubSearchRepositories = defineTool({
 
 const githubGetRepository = defineTool({
     name: 'github.getRepository',
+    capabilities: ['github.read'],
     description: 'Get a GitHub repository by owner/repo (read-only)',
     inputSchema: {
         type: 'object',
@@ -181,6 +183,7 @@ const githubGetRepository = defineTool({
 
 const githubListIssues = defineTool({
     name: 'github.listIssues',
+    capabilities: ['github.read', 'github.issues'],
     description: 'List GitHub issues for a repository (read-only)',
     inputSchema: {
         type: 'object',
@@ -241,6 +244,7 @@ const githubListIssues = defineTool({
 
 const githubListPullRequests = defineTool({
     name: 'github.listPullRequests',
+    capabilities: ['github.read', 'github.pull_requests'],
     description: 'List GitHub pull requests for a repository (read-only)',
     inputSchema: {
         type: 'object',

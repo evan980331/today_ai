@@ -43,6 +43,7 @@ function checkMaxEntries(toolName, value) {
 
 const filesystemRead = defineTool({
     name: 'filesystem.read',
+    capabilities: ['filesystem.read'],
     description: 'Read a UTF-8 text file inside the workspace (read-only)',
     inputSchema: {
         type: 'object',
@@ -76,6 +77,7 @@ const filesystemRead = defineTool({
 
 const filesystemList = defineTool({
     name: 'filesystem.list',
+    capabilities: ['filesystem.read', 'filesystem.list'],
     description: 'List a directory inside the workspace, non-recursive (read-only)',
     inputSchema: {
         type: 'object',

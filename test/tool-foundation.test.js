@@ -45,7 +45,7 @@ describe('P2-A tool contract', () => {
         toolRegistry.register({ name: 'm', description: 'M', inputSchema: { type: 'string' }, readOnly: true, execute: async () => 1 });
         const l = toolRegistry.list();
         assert.equal(l.length, 1);
-        assert.deepEqual(l[0], { name: 'm', description: 'M', inputSchema: { type: 'string' }, readOnly: true, needsApproval: false });
+        assert.deepEqual(l[0], { name: 'm', description: 'M', inputSchema: { type: 'string' }, readOnly: true, needsApproval: false, capabilities: [] });
         assert.equal(typeof l[0].execute, 'undefined');
     });
     it('13 list() cannot mutate registry internal state', () => {
@@ -56,7 +56,7 @@ describe('P2-A tool contract', () => {
         l[0].inputSchema = { hacked: true };
         assert.equal(toolRegistry.has('fake'), false);
         assert.equal(toolRegistry.get('imm').name, 'imm');
-        assert.deepEqual(toolRegistry.list(), [{ name: 'imm', description: 'I', inputSchema: null, readOnly: false, needsApproval: false }]);
+        assert.deepEqual(toolRegistry.list(), [{ name: 'imm', description: 'I', inputSchema: null, readOnly: false, needsApproval: false, capabilities: [] }]);
     });
 });
 

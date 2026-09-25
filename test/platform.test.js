@@ -50,7 +50,7 @@ describe('Tool interface + registry', () => {
         registry.register({ name: 'github', description: 'Repos', execute: async () => 'repos' });
         assert.ok(registry.has('github'));
         assert.equal(registry.get('github').description, 'Repos');
-        assert.deepEqual(registry.list(), [{ name: 'github', description: 'Repos', inputSchema: null, readOnly: false, needsApproval: false }]);
+        assert.deepEqual(registry.list(), [{ name: 'github', description: 'Repos', inputSchema: null, readOnly: false, needsApproval: false, capabilities: [] }]);
         assert.throws(() => registry.register({ name: 'github', description: 'dup', execute: async () => 1 }), /already registered/);
         assert.deepEqual(registry.validateAll(['github']), ['github']);
         assert.deepEqual(registry.validateAll(), []);

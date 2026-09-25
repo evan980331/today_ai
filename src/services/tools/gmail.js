@@ -107,6 +107,7 @@ function headerOf(headers, name) {
 
 const gmailSearch = defineTool({
     name: 'gmail.search',
+    capabilities: ['email.read', 'email.search'],
     description: 'Search Gmail messages (read-only) by query string',
     inputSchema: {
         type: 'object',
@@ -153,6 +154,7 @@ const gmailSearch = defineTool({
 
 const gmailGetMessage = defineTool({
     name: 'gmail.getMessage',
+    capabilities: ['email.read'],
     description: 'Get a Gmail message by id (read-only), text/plain preferred',
     inputSchema: {
         type: 'object',
@@ -200,6 +202,7 @@ const gmailGetMessage = defineTool({
 
 const gmailListThreads = defineTool({
     name: 'gmail.listThreads',
+    capabilities: ['email.read'],
     description: 'List Gmail threads (read-only), optional query filter',
     inputSchema: {
         type: 'object',

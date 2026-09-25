@@ -1,7 +1,9 @@
 // Tool interface for future Gmail / GitHub / Calendar integrations.
 //
 // A Tool is a plain object (frozen by defineTool):
-//   { name, description, inputSchema, readOnly, needsApproval, execute }
+//   { name, description, inputSchema, readOnly, needsApproval, capabilities, execute }
+// capabilities is planner-selection metadata only (string[], default []):
+// it never replaces Permission and never executes anything.
 // where execute(input, context) is async and returns a JSON-serializable
 // value. Tools never touch OpenCode, child processes, or worker internals;
 // they run inside the Vercel-safe backend layer. No Gmail/GitHub/Calendar
@@ -24,7 +26,7 @@ function defineTool(def) {
     if (!def || typeof def !== 'object' || Array.isArray(def)) {
         throw toolError(400, 'tool definition must be an object');
     }
-    const { name, description, execute, inputSchema, readOnly, needsApproval } = def;
+    const { name, description, execute, inputSchema, readOnly, needsApproval, capabilities } = def;
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
         throw toolError(400, 'tool name must match /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/ (namespaced tools use dots, e.g. gmail.search)');
     }
@@ -50,13 +52,23 @@ function defineTool(def) {
     if (needsApproval !== undefined && typeof needsApproval !== 'boolean') {
         throw toolError(400, `tool "${name}" needsApproval must be a boolean`);
     }
+    // capabilities: planner-selection metadata only, string[] default [].
+    // Defensive copy + frozen so external code can never mutate the inside.
+    let caps = [];
+    if (capabilities !== undefined && capabilities !== null) {
+        if (!Array.isArray(capabilities) || !capabilities.every((c) => typeof c === 'string')) {
+            throw toolError(400, `tool "${name}" capabilities must be an array of strings`);
+        }
+        caps = capabilities.slice();
+    }
     const tool = {
         name,
         description: description.trim(),
         execute,
         inputSchema: schema,
         readOnly: readOnly === undefined ? false : readOnly,
-        needsApproval: needsApproval === undefined ? false : needsApproval
+        needsApproval: needsApproval === undefined ? false : needsApproval,
+        capabilities: Object.freeze(caps)
     };
     return Object.freeze(tool);
 }
@@ -74,7 +86,8 @@ function toMetadata(tool) {
                 ? JSON.parse(JSON.stringify(tool.inputSchema))
                 : tool.inputSchema),
         readOnly: !!tool.readOnly,
-        needsApproval: !!tool.needsApproval
+        needsApproval: !!tool.needsApproval,
+        capabilities: Array.isArray(tool.capabilities) ? tool.capabilities.slice() : []
     };
 }
 
