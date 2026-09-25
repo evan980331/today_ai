@@ -160,7 +160,7 @@ describe('P2-G metadata integrity', () => {
         assert.deepEqual(md, before);
         assert.deepEqual(toolRegistry.list(), before);
     });
-    it('all 13 native tools carry the specified capabilities', () => {
+    it('all 15 native tools carry the specified capabilities', () => {
         const md = fullMetadata();
         const byName = new Map(md.map((m) => [m.name, m]));
         const expected = {
@@ -176,9 +176,11 @@ describe('P2-G metadata integrity', () => {
             'github.listIssues': ['github.read', 'github.issues'],
             'github.listPullRequests': ['github.read', 'github.pull_requests'],
             'filesystem.read': ['filesystem.read'],
-            'filesystem.list': ['filesystem.read', 'filesystem.list']
+            'filesystem.list': ['filesystem.read', 'filesystem.list'],
+            'filesystem.write': ['filesystem.write'],
+            'filesystem.createDirectory': ['filesystem.write', 'filesystem.createDirectory']
         };
-        assert.equal(md.length, 13);
+        assert.equal(md.length, 15);
         for (const [name, caps] of Object.entries(expected)) {
             assert.deepEqual(byName.get(name).capabilities, caps, name);
         }
@@ -228,6 +230,39 @@ describe('P2-G core integration (auto selection end to end)', () => {
         const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'agent', 'core.js'), 'utf8');
         for (const w of ['calculator', 'gmail', 'calendar', 'github', 'filesystem']) {
             assert.ok(!src.includes(w), `core must not reference ${w}`);
+        }
+    });
+});
+
+describe('P2-H planner write selection', () => {
+    it('29 write intents select filesystem.write', () => {
+        const md = fullMetadata();
+        for (const prompt of ['寫入檔案', '建立檔案', '新增檔案', 'create file', 'write file']) {
+            const steps = planner.plan({ prompt, tools: [] }, { toolMetadata: md });
+            assert.equal(steps[0].kind, 'tool', prompt);
+            assert.equal(steps[0].name, 'filesystem.write', prompt);
+        }
+    });
+    it('30 mkdir intents select filesystem.createDirectory', () => {
+        const md = fullMetadata();
+        for (const prompt of ['建立資料夾', '建立目錄', 'create directory']) {
+            const steps = planner.plan({ prompt, tools: [] }, { toolMetadata: md });
+            assert.equal(steps[0].kind, 'tool', prompt);
+            assert.equal(steps[0].name, 'filesystem.createDirectory', prompt);
+        }
+    });
+    it('31 generic code modification still falls back OpenCode', () => {
+        const md = fullMetadata();
+        for (const prompt of ['幫我修改 README 檔案', 'implement feature', '修 bug', '重構這個函式']) {
+            const steps = planner.plan({ prompt, tools: [] }, { toolMetadata: md });
+            assert.equal(steps[0].kind, 'runtime', prompt);
+        }
+    });
+    it('32 shell commands still fall back OpenCode', () => {
+        const md = fullMetadata();
+        for (const prompt of ['執行 ls 指令', '執行 shell 腳本']) {
+            const steps = planner.plan({ prompt, tools: [] }, { toolMetadata: md });
+            assert.equal(steps[0].kind, 'runtime', prompt);
         }
     });
 });

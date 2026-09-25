@@ -1,15 +1,20 @@
-// Filesystem Native Tools (read-only): filesystem.read / filesystem.list.
+// Filesystem Native Tools: filesystem.read / filesystem.list (read-only)
+// plus filesystem.write / filesystem.createDirectory (write, approval-gated).
 //
-// Built with defineTool() per the P2-A contract. Reads go through the
-// sandbox resolver (./filesystem/sandbox.js) and the read-only client
+// Built with defineTool() per the P2-A contract. All paths go through the
+// sandbox resolver (./filesystem/sandbox.js) and the client
 // (./filesystem/client.js): fs/promises only, no child_process, no shell,
-// no URLs, no writes of any kind.
+// no URLs, no delete/move.
+//
+// Write tools carry needsApproval:true and rely solely on the Permission
+// gate in ToolRegistry.execute() — no second approval system here.
 //
 // The Agent Core never imports this file — tools reach execution only via
 // Planner -> ToolRegistry.
 const { defineTool } = require('./tool');
 const { resolveSandboxPath } = require('../filesystem/sandbox');
 const fsClient = require('../filesystem/client');
+const posixPath = require('path').posix;
 
 function inputError(toolName, message) {
     return Object.assign(new Error(`${toolName}: ${message}`), { status: 400, code: 'TOOL_INVALID_INPUT' });
@@ -23,6 +28,13 @@ function checkAborted(ctx) {
 
 function signalOf(ctx) {
     return ctx && ctx.signal ? ctx.signal : null;
+}
+
+// Parent of a root-relative display path ('.' for the root itself).
+// displayPath always uses '/' separators on every platform.
+function parentOf(displayPath) {
+    const d = posixPath.dirname(displayPath);
+    return d === '' ? '.' : d;
 }
 
 function checkMaxBytes(toolName, value) {
@@ -114,4 +126,69 @@ const filesystemList = defineTool({
     }
 });
 
-module.exports = { filesystemRead, filesystemList };
+const filesystemWrite = defineTool({
+    name: 'filesystem.write',
+    capabilities: ['filesystem.write'],
+    description: 'Write UTF-8 text to a file inside the workspace (needs approval)',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            path: { type: 'string', description: 'workspace-relative file path' },
+            content: { type: 'string', description: 'UTF-8 text content to write' }
+        },
+        required: ['path', 'content']
+    },
+    readOnly: false,
+    needsApproval: true,
+    execute: async (input, ctx) => {
+        checkAborted(ctx);
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+            throw inputError('filesystem.write', 'input must be an object with path and content');
+        }
+        if (typeof input.path !== 'string' || !input.path.trim()) {
+            throw inputError('filesystem.write', 'path must be a non-empty string');
+        }
+        if (typeof input.content !== 'string') {
+            throw inputError('filesystem.write', 'content must be a string');
+        }
+        const resolved = await resolveSandboxPath(input.path);
+        // Parent chain is re-resolved explicitly so its containment is
+        // verified before anything is created beneath it.
+        await resolveSandboxPath(parentOf(resolved.displayPath));
+        checkAborted(ctx);
+        const data = await fsClient.writeFile(resolved, { content: input.content, signal: signalOf(ctx) });
+        checkAborted(ctx);
+        return { result: data, mcpTools: ['filesystem.write'] };
+    }
+});
+
+const filesystemCreateDirectory = defineTool({
+    name: 'filesystem.createDirectory',
+    capabilities: ['filesystem.write', 'filesystem.createDirectory'],
+    description: 'Create a directory inside the workspace, recursive (needs approval)',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            path: { type: 'string', description: 'workspace-relative directory path' }
+        },
+        required: ['path']
+    },
+    readOnly: false,
+    needsApproval: true,
+    execute: async (input, ctx) => {
+        checkAborted(ctx);
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+            throw inputError('filesystem.createDirectory', 'input must be an object with path');
+        }
+        if (typeof input.path !== 'string' || !input.path.trim()) {
+            throw inputError('filesystem.createDirectory', 'path must be a non-empty string');
+        }
+        const resolved = await resolveSandboxPath(input.path);
+        checkAborted(ctx);
+        const data = await fsClient.makeDir(resolved, { signal: signalOf(ctx) });
+        checkAborted(ctx);
+        return { result: data, mcpTools: ['filesystem.createDirectory'] };
+    }
+});
+
+module.exports = { filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory };

@@ -11,15 +11,19 @@
 // Unknown tools/names are NOT validated here; execution layer raises
 // TOOL_NOT_FOUND / unknown runtime with original codes.
 
-// Write/mutation intent: read-only tools must never intercept these.
+// Write/mutation intent: tools that cannot serve these must never intercept.
 // Checked first, as plain substring guards (no NLP).
+// NOTE (P2-H): bare 建立/新增/寫入 (+ write/create) are NOT guards anymore —
+// they are legitimate write-tool intents gated by Permission at execution.
+// Generic coding intent is still caught by 幫我寫/修改/實作-style guards,
+// and single-keyword tasks fall back via the MIN_SCORE threshold.
 const WRITE_GUARDS = [
     '修改', '修改檔案', '改 code', '改code', '幫我改',
     '刪除', '删除', '移除文件', '刪除檔案', '刪除文件',
-    '寫入', '寫文件', '寫檔案', '新增', '建立', '創建', '更新',
+    '寫文件', '寫檔案',
     '執行', '運行', '跑一下', '跑個', '終端', '命令列',
     '寄信', '寄一封', '寄出', '寄給', '寄送', '傳送', '發送郵件', '發送', '回覆郵件', '整理',
-    'modify', 'delete', 'remove', 'write', 'create', 'update',
+    'modify', 'delete', 'remove', 'update',
     'run', 'execute', 'shell', 'command', 'send', 'npm', 'terminal',
     '撰寫', '實作', '開發', '寫一個', '寫個', '幫我寫',
     'implement', 'build'
@@ -43,7 +47,9 @@ const TOOL_KEYWORDS = [
     { name: 'github.listIssues', keywords: ['github', 'repository', '議題', '問題', '列出', /\bissue\b/i, /\bissues\b/i, /\blist\b/i, /\brepo\b/i] },
     { name: 'github.listPullRequests', keywords: ['github', 'repository', '合併請求', '列出', 'pull request', 'pull requests', /\blist\b/i, /\brepo\b/i, /\bpr\b/i] },
     { name: 'filesystem.read', keywords: ['檔案', '文件', '讀取', '打開', '開啟', '內容', '查看檔案', /\bread\b/i, /\bfile\b/i] },
-    { name: 'filesystem.list', keywords: ['資料夾', '目錄', '列出', '檔案', '有哪些檔案', /\bfolder\b/i, /\bdirectory\b/i, /\blist\b/i] }
+    { name: 'filesystem.list', keywords: ['資料夾', '目錄', '列出', '檔案', '有哪些檔案', /\bfolder\b/i, /\bdirectory\b/i, /\blist\b/i] },
+    { name: 'filesystem.write', keywords: ['寫入', '建立', '新增', '寫入檔案', '寫入文件', '建立檔案', '新增檔案', '寫一個檔案', 'write file', 'create file', 'create', /\bwrite\b/i] },
+    { name: 'filesystem.createDirectory', keywords: ['建立', '新增', '建立資料夾', '建立目錄', '新增資料夾', '建立文件夹', '開新資料夾', 'create directory', 'mkdir', /\bdirectory\b/i] }
 ];
 
 // Minimum score for a confident selection; the best match must also be

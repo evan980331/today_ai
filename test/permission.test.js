@@ -129,12 +129,16 @@ describe('P2-F permission boundary', () => {
     it('15 unknown tool still TOOL_NOT_FOUND (before permission)', async () => {
         await assert.rejects(() => toolRegistry.execute('nope.missing', null, APPROVED), (e) => e.code === 'TOOL_NOT_FOUND');
     });
-    it('16 production 13 tools keep needsApproval=false', () => {
+    it('16 production 15 tools keep needsApproval=false except write tools', () => {
         toolRegistry._clearForTests();
         const r = registerNativeTools(toolRegistry);
-        assert.equal(r.registered.length, 13);
+        assert.equal(r.registered.length, 15);
         for (const t of toolRegistry.list()) {
-            assert.equal(t.needsApproval, false, t.name);
+            if (t.name === 'filesystem.write' || t.name === 'filesystem.createDirectory') {
+                assert.equal(t.needsApproval, true, t.name);
+            } else {
+                assert.equal(t.needsApproval, false, t.name);
+            }
         }
     });
     it('permission errors carry no input or paths', async () => {

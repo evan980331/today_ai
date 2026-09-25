@@ -67,7 +67,7 @@ describe('P2-E metadata + registration', () => {
         const r1 = registerNativeTools(toolRegistry);
         assert.ok(r1.registered.includes('filesystem.read'));
         assert.ok(r1.registered.includes('filesystem.list'));
-        assert.equal(toolRegistry.list().length, 13);
+        assert.equal(toolRegistry.list().length, 15);
         const r2 = registerNativeTools(toolRegistry);
         assert.deepEqual(r2.registered, []);
     });
@@ -241,5 +241,163 @@ describe('P2-E core path + abort/timeout + leakage', () => {
             assert.ok(!JSON.stringify({ m: e.message }).includes(ROOT));
             return e.code === 'FILESYSTEM_SANDBOX_VIOLATION';
         });
+    });
+});
+
+const APPROVED = { approval: { status: 'approved' } };
+
+describe('P2-H filesystem.write', () => {
+    it('1 write new file', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.write', { path: 'new.txt', content: 'hi' }, APPROVED);
+        assert.equal(out.result.path, 'new.txt');
+        assert.equal(out.result.created, true);
+        assert.ok(out.mcpTools.includes('filesystem.write'));
+        assert.equal(await fsp.readFile(path.join(ROOT, 'new.txt'), 'utf8'), 'hi');
+    });
+    it('2 overwrite existing file', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.write', { path: 'hello.txt', content: 'v2' }, APPROVED);
+        assert.equal(out.result.created, false);
+        assert.equal(await fsp.readFile(path.join(ROOT, 'hello.txt'), 'utf8'), 'v2');
+    });
+    it('3 UTF-8 Chinese content', async () => {
+        registerNativeTools(toolRegistry);
+        await toolRegistry.execute('filesystem.write', { path: 'zh.txt', content: '你好世界' }, APPROVED);
+        assert.equal(await fsp.readFile(path.join(ROOT, 'zh.txt'), 'utf8'), '你好世界');
+    });
+    it('4 empty content', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.write', { path: 'empty.txt', content: '' }, APPROVED);
+        assert.equal(out.result.bytes, 0);
+        assert.equal(await fsp.readFile(path.join(ROOT, 'empty.txt'), 'utf8'), '');
+    });
+    it('5/6 nested path with parent creation', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.write', { path: 'a/b/c.txt', content: 'deep' }, APPROVED);
+        assert.equal(out.result.path, 'a/b/c.txt');
+        assert.equal(await fsp.readFile(path.join(ROOT, 'a', 'b', 'c.txt'), 'utf8'), 'deep');
+    });
+    it('write rejects non-string content (no buffer/base64 bypass)', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'x.txt', content: 123 }, APPROVED), (e) => e.code === 'TOOL_INVALID_INPUT');
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'x.txt' }, APPROVED), (e) => e.code === 'TOOL_INVALID_INPUT');
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', 'justastring', APPROVED), (e) => e.code === 'TOOL_INVALID_INPUT');
+    });
+});
+
+describe('P2-H filesystem.createDirectory', () => {
+    it('7 create directory', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.createDirectory', { path: 'nd' }, APPROVED);
+        assert.equal(out.result.created, true);
+        assert.ok(out.mcpTools.includes('filesystem.createDirectory'));
+        assert.ok((await fsp.stat(path.join(ROOT, 'nd'))).isDirectory());
+    });
+    it('8 nested directory', async () => {
+        registerNativeTools(toolRegistry);
+        await toolRegistry.execute('filesystem.createDirectory', { path: 'n1/n2/n3' }, APPROVED);
+        assert.ok((await fsp.stat(path.join(ROOT, 'n1', 'n2', 'n3'))).isDirectory());
+    });
+    it('9 existing directory is idempotent', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.createDirectory', { path: 'sub' }, APPROVED);
+        assert.equal(out.result.created, false);
+    });
+    it('10 existing file errors', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.createDirectory', { path: 'hello.txt' }, APPROVED), (e) => e.code === 'FILESYSTEM_ALREADY_EXISTS');
+    });
+});
+
+describe('P2-H write sandbox security', () => {
+    it('11/12 traversal + absolute escape blocked (write + mkdir)', async () => {
+        registerNativeTools(toolRegistry);
+        for (const tool of ['filesystem.write', 'filesystem.createDirectory']) {
+            const input = tool === 'filesystem.write' ? { path: '../evil.txt', content: 'x' } : { path: '../evil' };
+            await assert.rejects(() => toolRegistry.execute(tool, input, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION', tool);
+            const abs = tool === 'filesystem.write' ? { path: path.join(path.dirname(ROOT), 'evil.txt'), content: 'x' } : { path: path.join(path.dirname(ROOT), 'evil') };
+            await assert.rejects(() => toolRegistry.execute(tool, abs, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION', tool);
+        }
+    });
+    it('13 encoded traversal blocked', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: '%2e%2e/evil.txt', content: 'x' }, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION');
+    });
+    it('14 null byte blocked', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'a\0b', content: 'x' }, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION');
+    });
+    it('15/16 symlink + parent symlink escape blocked', async () => {
+        if (!hasLink('link-out')) return;
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'link-out/evil.txt', content: 'x' }, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION');
+        await assert.rejects(() => toolRegistry.execute('filesystem.createDirectory', { path: 'link-out/evil' }, APPROVED), (e) => e.code === 'FILESYSTEM_SANDBOX_VIOLATION');
+        assert.ok(!fs.existsSync(path.join(os.tmpdir(), 'evil.txt')));
+    });
+    it('17/18/19 failures normalized without absolute paths', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'sub', content: 'x' }, APPROVED), (e) => {
+            assert.ok(!e.message.includes(ROOT));
+            return e.code === 'FILESYSTEM_ALREADY_EXISTS';
+        });
+        await assert.rejects(() => toolRegistry.execute('filesystem.createDirectory', { path: '../x' }, APPROVED), (e) => {
+            assert.ok(!e.message.includes(ROOT));
+            return e.code === 'FILESYSTEM_SANDBOX_VIOLATION';
+        });
+    });
+});
+
+describe('P2-H write permission', () => {
+    it('20/21 write without/pending approval -> PERMISSION_REQUIRED, nothing written', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'p1.txt', content: 'x' }), (e) => e.code === 'PERMISSION_REQUIRED');
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'p1.txt', content: 'x' }, { approval: { status: 'pending' } }), (e) => e.code === 'PERMISSION_REQUIRED');
+        assert.ok(!fs.existsSync(path.join(ROOT, 'p1.txt')));
+    });
+    it('22 write rejected -> PERMISSION_DENIED', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.write', { path: 'p2.txt', content: 'x' }, { approval: { status: 'rejected' } }), (e) => e.code === 'PERMISSION_DENIED');
+        assert.ok(!fs.existsSync(path.join(ROOT, 'p2.txt')));
+    });
+    it('23 write approved executes once', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.write', { path: 'p3.txt', content: 'ok' }, APPROVED);
+        assert.equal(out.result.bytes, 2);
+        assert.equal(await fsp.readFile(path.join(ROOT, 'p3.txt'), 'utf8'), 'ok');
+    });
+    it('24/25 mkdir without approval -> REQUIRED; approved executes', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => toolRegistry.execute('filesystem.createDirectory', { path: 'pd' }), (e) => e.code === 'PERMISSION_REQUIRED');
+        assert.ok(!fs.existsSync(path.join(ROOT, 'pd')));
+        const out = await toolRegistry.execute('filesystem.createDirectory', { path: 'pd' }, APPROVED);
+        assert.equal(out.result.created, true);
+    });
+    it('26 permission errors do not retry via core', async () => {
+        registerNativeTools(toolRegistry);
+        await assert.rejects(() => core.run({ id: 'pw1', prompt: 'x', sessionId: 's', tools: ['filesystem.write'] }, {}), (e) => e.code === 'PERMISSION_REQUIRED');
+        assert.equal(core.isRetryable(Object.assign(new Error('x'), { code: 'PERMISSION_REQUIRED', status: 400 })), false);
+        assert.ok(!fs.existsSync(path.join(ROOT, 'x')));
+    });
+});
+
+describe('P2-H write tool metadata', () => {
+    it('27 filesystem.write readOnly=false needsApproval=true', () => {
+        assert.equal(fsTools.filesystemWrite.readOnly, false);
+        assert.equal(fsTools.filesystemWrite.needsApproval, true);
+        assert.deepEqual(fsTools.filesystemWrite.capabilities, ['filesystem.write']);
+        assert.ok(Object.isFrozen(fsTools.filesystemWrite));
+    });
+    it('28 filesystem.createDirectory readOnly=false needsApproval=true', () => {
+        assert.equal(fsTools.filesystemCreateDirectory.readOnly, false);
+        assert.equal(fsTools.filesystemCreateDirectory.needsApproval, true);
+        assert.deepEqual(fsTools.filesystemCreateDirectory.capabilities, ['filesystem.write', 'filesystem.createDirectory']);
+        assert.ok(Object.isFrozen(fsTools.filesystemCreateDirectory));
+    });
+    it('read/list stay read-only with no approval', () => {
+        assert.equal(fsTools.filesystemRead.readOnly, true);
+        assert.equal(fsTools.filesystemRead.needsApproval, false);
+        assert.equal(fsTools.filesystemList.readOnly, true);
+        assert.equal(fsTools.filesystemList.needsApproval, false);
     });
 });

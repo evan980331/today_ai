@@ -1,13 +1,18 @@
-// Minimal read-only filesystem client — P2-E foundation.
+// Minimal filesystem client — P2-E reads + P2-H writes.
 //
-// Only fs/promises, only reads: readFile + readdir. No child_process, no
-// shell, no URL handling, no write/append/rm/unlink/rename/mkdir/chmod.
+// Only fs/promises. Reads: readFile + readdir. Writes: writeFile (atomic
+// temp + rename) + mkdir recursive. No child_process, no shell, no URL
+// handling, no delete/rename-exposed/move/chmod.
 //
 // Every method takes a sandbox-resolved { absolutePath, displayPath } (from
-// ./sandbox.js) — never a raw user path. Errors are normalized to the
-// FILESYSTEM_* contract and never contain the absolute workspace root,
-// environment values, or stack traces.
+// ./sandbox.js) — never a raw user path. The resolved absolute path is
+// containment-checked by the sandbox, so derived paths (parent dir, temp
+// file in the same directory) cannot escape either. Errors are normalized
+// to the FILESYSTEM_* contract and never contain the absolute workspace
+// root, environment values, or stack traces.
 const fs = require('fs/promises');
+const path = require('path');
+const crypto = require('crypto');
 
 const DEFAULT_MAX_BYTES = 65536;
 const HARD_MAX_BYTES = 1048576;
@@ -99,4 +104,76 @@ async function listDir(resolved, { signal = null } = {}) {
     };
 }
 
-module.exports = { readFile, listDir, mapFsError, DEFAULT_MAX_BYTES, HARD_MAX_BYTES };
+// Atomic UTF-8 text write: temp file in the same directory + rename.
+// Overwrites existing files; refuses existing directories. Parent
+// directories are created as needed — the parent of a contained path is
+// itself contained, so this cannot escape the sandbox.
+async function writeFile(resolved, { content, signal = null } = {}) {
+    checkAborted(signal);
+    const { absolutePath, displayPath } = resolved;
+    if (typeof content !== 'string') {
+        throw fsError(400, 'FILESYSTEM_INVALID_INPUT', 'content must be a string');
+    }
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > HARD_MAX_BYTES) {
+        throw fsError(400, 'FILESYSTEM_TOO_LARGE', `content exceeds ${HARD_MAX_BYTES} bytes (${displayPath})`);
+    }
+    let existed = false;
+    try {
+        const st = await fs.lstat(absolutePath);
+        existed = true;
+        if (st.isDirectory()) {
+            throw fsError(400, 'FILESYSTEM_ALREADY_EXISTS', `target is a directory (${displayPath})`);
+        }
+    } catch (e) {
+        if (e && e.code === 'FILESYSTEM_ALREADY_EXISTS') throw e;
+        if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) {
+            throw mapFsError(e, displayPath, 'write');
+        }
+    }
+    try {
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    } catch (e) {
+        throw mapFsError(e, displayPath, 'write');
+    }
+    checkAborted(signal);
+    const tmp = `${absolutePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    try {
+        if (signal) await fs.writeFile(tmp, content, { encoding: 'utf8', signal });
+        else await fs.writeFile(tmp, content, { encoding: 'utf8' });
+        checkAborted(signal);
+        await fs.rename(tmp, absolutePath);
+    } catch (e) {
+        try { await fs.unlink(tmp); } catch { /* best-effort temp cleanup */ }
+        throw mapFsError(e, displayPath, 'write');
+    }
+    checkAborted(signal);
+    return { path: displayPath, bytes, created: !existed };
+}
+
+// Recursive directory creation inside the sandbox. Existing directories
+// succeed idempotently; an existing file at the target is an error.
+async function makeDir(resolved, { signal = null } = {}) {
+    checkAborted(signal);
+    const { absolutePath, displayPath } = resolved;
+    try {
+        const st = await fs.lstat(absolutePath);
+        if (st.isDirectory()) return { path: displayPath, created: false };
+        throw fsError(400, 'FILESYSTEM_ALREADY_EXISTS', `already exists as a file (${displayPath})`);
+    } catch (e) {
+        if (e && e.code === 'FILESYSTEM_ALREADY_EXISTS') throw e;
+        if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) {
+            throw mapFsError(e, displayPath, 'mkdir');
+        }
+    }
+    try {
+        if (signal) await fs.mkdir(absolutePath, { recursive: true, signal });
+        else await fs.mkdir(absolutePath, { recursive: true });
+    } catch (e) {
+        throw mapFsError(e, displayPath, 'mkdir');
+    }
+    checkAborted(signal);
+    return { path: displayPath, created: true };
+}
+
+module.exports = { readFile, listDir, writeFile, makeDir, mapFsError, DEFAULT_MAX_BYTES, HARD_MAX_BYTES };

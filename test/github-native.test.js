@@ -239,16 +239,16 @@ describe('P2-D Phase B: GitHub Native Tools', () => {
         toolRegistry._clearForTests();
     });
 
-    it('A registers four GitHub tools in the thirteen-tool native set', () => {
+    it('A registers four GitHub tools in the fifteen-tool native set', () => {
         const registration = registerGitHubTools();
         assert.deepEqual(NATIVE_TOOL_NAMES, [
             'calculator', 'gmail.search', 'gmail.getMessage', 'gmail.listThreads',
             'calendar.listCalendars', 'calendar.listEvents', 'calendar.getEvent',
             ...names,
-            'filesystem.read', 'filesystem.list'
+            'filesystem.read', 'filesystem.list', 'filesystem.write', 'filesystem.createDirectory'
         ]);
         assert.deepEqual(registration.registered, NATIVE_TOOL_NAMES);
-        assert.equal(toolRegistry.list().length, 13);
+        assert.equal(toolRegistry.list().length, 15);
         assert.deepEqual(toolRegistry.list().filter((tool) => tool.name.startsWith('github.')).map((tool) => tool.name), names);
     });
 
@@ -512,7 +512,7 @@ describe('P2-D Phase B: GitHub Native Tools', () => {
 
     it('X resets the injected client and native registry cleanly', () => {
         registerGitHubTools();
-        assert.equal(toolRegistry.list().length, 13);
+        assert.equal(toolRegistry.list().length, 15);
         resetGitHubClientFactory();
         toolRegistry._clearForTests();
         assert.equal(toolRegistry.list().length, 0);
