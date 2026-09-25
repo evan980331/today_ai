@@ -33,6 +33,14 @@ function checkMaxBytes(toolName, value) {
     return value;
 }
 
+function checkMaxEntries(toolName, value) {
+    if (value === undefined || value === null) return 500;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 5000) {
+        throw inputError(toolName, 'maxEntries must be an integer between 1 and 5000');
+    }
+    return value;
+}
+
 const filesystemRead = defineTool({
     name: 'filesystem.read',
     description: 'Read a UTF-8 text file inside the workspace (read-only)',
@@ -72,7 +80,8 @@ const filesystemList = defineTool({
     inputSchema: {
         type: 'object',
         properties: {
-            path: { type: 'string', description: 'workspace-relative directory (empty or . = root)' }
+            path: { type: 'string', description: 'workspace-relative directory (empty or . = root)' },
+            maxEntries: { type: 'number', description: 'max entries to return (1-5000, default 500)' }
         }
     },
     readOnly: true,
@@ -88,13 +97,18 @@ const filesystemList = defineTool({
         if (obj.path !== undefined && obj.path !== null && typeof obj.path !== 'string') {
             throw inputError('filesystem.list', 'path must be a string when provided');
         }
+        const maxEntries = checkMaxEntries('filesystem.list', obj.maxEntries);
         const resolved = await resolveSandboxPath(
             typeof obj.path === 'string' && obj.path.trim() ? obj.path : '.'
         );
         checkAborted(ctx);
         const data = await fsClient.listDir(resolved, { signal: signalOf(ctx) });
         checkAborted(ctx);
-        return { result: data, mcpTools: ['filesystem.list'] };
+        const truncated = data.entries.length > maxEntries;
+        return {
+            result: { path: data.path, entries: data.entries.slice(0, maxEntries), truncated },
+            mcpTools: ['filesystem.list']
+        };
     }
 });
 

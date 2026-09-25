@@ -26,6 +26,10 @@ before(async () => {
     await fsp.mkdir(path.join(ROOT, 'sub'));
     await fsp.writeFile(path.join(ROOT, 'sub', 'nested.txt'), 'nested');
     await fsp.mkdir(path.join(ROOT, 'empty'));
+    await fsp.mkdir(path.join(ROOT, 'many'));
+    for (let i = 0; i < 12; i += 1) {
+        await fsp.writeFile(path.join(ROOT, 'many', `f${i}.txt`), 'x');
+    }
     try {
         await fsp.symlink(os.tmpdir(), path.join(ROOT, 'link-out'));
     } catch { /* symlink privilege missing -> related test skips */ }
@@ -172,6 +176,35 @@ describe('P2-E filesystem.list', () => {
         assert.throws(() => fsClient.mapFsError(Object.assign(new Error('x'), { code: 'EACCES' }), 'f', 'read'), (e) => e.code === 'FILESYSTEM_PERMISSION_DENIED');
         assert.throws(() => fsClient.mapFsError(Object.assign(new Error('x'), { code: 'ENOENT' }), 'f', 'read'), (e) => e.code === 'FILESYSTEM_NOT_FOUND');
         assert.throws(() => fsClient.mapFsError(Object.assign(new Error('boom /secret/root/x'), { code: 'EIO' }), 'f', 'read'), (e) => !e.message.includes('/secret/root'));
+    });
+});
+
+describe('P2-F filesystem.list maxEntries', () => {
+    it('17 default maxEntries (no truncation on small dirs)', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.list', { path: 'sub' });
+        assert.equal(out.result.truncated, false);
+        assert.equal(out.result.entries.length, 1);
+    });
+    it('18 custom maxEntries', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.list', { path: 'many', maxEntries: 12 });
+        assert.equal(out.result.truncated, false);
+        assert.equal(out.result.entries.length, 12);
+        await assert.rejects(() => toolRegistry.execute('filesystem.list', { path: 'many', maxEntries: 0 }), (e) => e.code === 'TOOL_INVALID_INPUT');
+        await assert.rejects(() => toolRegistry.execute('filesystem.list', { path: 'many', maxEntries: 5001 }), (e) => e.code === 'TOOL_INVALID_INPUT');
+    });
+    it('19 maxEntries truncation', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.list', { path: 'many', maxEntries: 5 });
+        assert.equal(out.result.truncated, true);
+        assert.equal(out.result.entries.length, 5);
+    });
+    it('20 truncated list never leaks root', async () => {
+        registerNativeTools(toolRegistry);
+        const out = await toolRegistry.execute('filesystem.list', { path: 'many', maxEntries: 3 });
+        assert.ok(!JSON.stringify(out).includes(ROOT));
+        assert.equal(out.result.path, 'many');
     });
 });
 

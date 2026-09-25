@@ -13,7 +13,16 @@
 //   validation (status 400) -> rethrown as-is (no retry)
 // - any other tool failure  -> TOOL_EXECUTION_ERROR (status 500 unless the
 //   tool already set one)
+// P2-F permission boundary (execute()):
+// - needsApproval=false     -> approval not_required, execute
+// - needsApproval=true,
+//   approval missing/pending -> PERMISSION_REQUIRED (status 400, no retry)
+// - approval rejected       -> PERMISSION_DENIED (status 400, no retry)
+// - unrecognized status     -> APPROVAL_INVALID (status 400, no retry)
+// The check runs before input validation and before any tool code, so a
+// denied caller never executes the tool and learns nothing from validation.
 const { defineTool, toMetadata, validateToolInput, createExecutionContext, isAbortError, isTimeoutError } = require('./tool');
+const { checkApproval } = require('../../agent/permission');
 
 const tools = new Map(); // name -> frozen tool
 
@@ -73,6 +82,8 @@ async function execute(name, input, context) {
     // Per-execution context: always a fresh object, never shared mutable state.
     const ctx = createExecutionContext(context || {});
     if (ctx.signal && ctx.signal.aborted) throw abortError();
+    // Permission gate: denied callers never reach validation or tool code.
+    checkApproval(tool, ctx);
     // Consistent input validation at the boundary (status 400).
     validateToolInput(tool, input);
 

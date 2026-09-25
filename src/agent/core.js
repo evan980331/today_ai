@@ -46,7 +46,9 @@ async function run(task, opts = {}) {
                         signal: opts.signal || null,
                         timeoutMs: opts.timeoutMs || null,
                         logger: opts.logger || null,
-                        approval: { status: 'not_required' }
+                        // Approval decision rides the context; default denies
+                        // nothing new (existing tools need no approval).
+                        approval: opts.approval || { status: 'not_required' }
                     };
                     try {
                         result = await toolRegistry.execute(step.name, step.input, toolCtx);
