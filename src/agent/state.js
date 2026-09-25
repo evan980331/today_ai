@@ -7,6 +7,7 @@ class AgentState {
         this.currentStep = null;
         this.history = [];
         this.toolResults = [];
+        this.steps = [];
         this.retries = 0;
         this.startedAt = Date.now();
         this.completedAt = null;
@@ -21,6 +22,9 @@ class AgentState {
     }
     addToolResult(result) {
         this.toolResults.push(result);
+    }
+    addStepRecord(record) {
+        this.steps.push(record);
     }
     complete(result) {
         this.status = 'completed';

@@ -113,6 +113,11 @@ function plan(task, opts = {}) {
     if (!task || typeof task !== 'object') {
         throw Object.assign(new Error('planner requires task'), { code: 'PLANNING_ERROR', status: 400 });
     }
+    // Multi-step injection (P2-I): an explicit step list is normalized and
+    // returned as-is. Pure function — no execution, no LLM, no replanning.
+    if (Array.isArray(opts.steps) && opts.steps.length > 0) {
+        return normalizeSteps(opts.steps);
+    }
     const prompt = typeof task.prompt === 'string' ? task.prompt : '';
     const tools = Array.isArray(task.tools) ? task.tools : [];
     if (tools.length > 0) {
@@ -135,4 +140,28 @@ function plan(task, opts = {}) {
     return [{ id: 'step-1', kind: 'runtime', name, input: prompt, description: `runtime:${name}` }];
 }
 
-module.exports = { plan, selectTool, TOOL_KEYWORDS, WRITE_GUARDS, MIN_SCORE };
+// Normalize an injected multi-step plan. Every step must declare
+// kind 'tool'|'runtime' and a non-empty name; ids and inputs default.
+// Throws PLANNING_ERROR on malformed steps — never executes anything.
+function normalizeSteps(steps) {
+    return steps.map((s, i) => {
+        if (!s || typeof s !== 'object' || Array.isArray(s)) {
+            throw Object.assign(new Error(`planner step ${i} must be an object`), { code: 'PLANNING_ERROR', status: 400 });
+        }
+        if (s.kind !== 'tool' && s.kind !== 'runtime') {
+            throw Object.assign(new Error(`planner step ${i} has unknown kind`), { code: 'PLANNING_ERROR', status: 400 });
+        }
+        if (typeof s.name !== 'string' || !s.name) {
+            throw Object.assign(new Error(`planner step ${i} requires a name`), { code: 'PLANNING_ERROR', status: 400 });
+        }
+        return {
+            id: typeof s.id === 'string' && s.id ? s.id : `step-${i + 1}`,
+            kind: s.kind,
+            name: s.name,
+            input: s.input !== undefined ? s.input : '',
+            description: typeof s.description === 'string' ? s.description : `${s.kind}:${s.name}`
+        };
+    });
+}
+
+module.exports = { plan, selectTool, normalizeSteps, TOOL_KEYWORDS, WRITE_GUARDS, MIN_SCORE };
