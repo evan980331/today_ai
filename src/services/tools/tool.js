@@ -111,6 +111,8 @@ function validateToolInput(tool, input) {
 // Execution context contract (per execution — never shared across runs).
 // Fields:
 //   taskId, sessionId : string|null routing identifiers
+//   owner             : string|null authenticated owner (server-supplied;
+//                       tools must never accept owner from tool input)
 //   signal            : AbortSignal|null
 //   timeoutMs         : number|null (execution budget; enforced by registry)
 //   logger            : { info,warn,error }|null logging hook (optional)
@@ -123,11 +125,14 @@ function createExecutionContext(fields = {}) {
         : (src.task && src.task.id !== undefined ? src.task.id : null);
     const sessionId = src.sessionId !== undefined ? src.sessionId
         : (src.task && src.task.sessionId !== undefined ? src.task.sessionId : null);
+    const owner = src.owner !== undefined ? src.owner
+        : (src.task && src.task.owner !== undefined ? src.task.owner : null);
     const signal = src.signal !== undefined ? src.signal
         : (src.step !== undefined ? undefined : null);
     const ctx = {
         taskId: typeof taskId === 'string' ? taskId : (taskId === null || taskId === undefined ? null : String(taskId)),
         sessionId: typeof sessionId === 'string' ? sessionId : (sessionId === null || sessionId === undefined ? null : String(sessionId)),
+        owner: typeof owner === 'string' && owner.trim() ? owner.trim().slice(0, 256) : null,
         signal: signal === undefined ? null : signal,
         timeoutMs: typeof src.timeoutMs === 'number' && Number.isFinite(src.timeoutMs) && src.timeoutMs > 0
             ? Math.floor(src.timeoutMs)

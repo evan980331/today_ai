@@ -133,6 +133,7 @@ async function executeStep(step, task, opts, state) {
         const toolCtx = {
             taskId: task.id || null,
             sessionId: task.sessionId || null,
+            owner: task.owner || null,
             signal: opts.signal || null,
             timeoutMs: opts.timeoutMs || null,
             logger: opts.logger || null,
