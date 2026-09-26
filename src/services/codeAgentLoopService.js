@@ -1,26 +1,32 @@
 // P3-6 Code Agent Loop: controlled orchestration over existing tools.
+// P3-7: the loop NEVER writes user files directly. Edits become a
+// change_propose step; the run then pauses with APPROVAL_REQUIRED and only
+// continues (change_apply + verify) on a later run that carries the
+// already-created proposalId plus a human approval. The loop never
+// approves its own proposal.
 //
-// This module adds NO new process, filesystem, or git capability. It builds
-// a bounded structured plan (inspect -> check/test -> edit -> verify) and
-// executes every step through the existing Agent Core (P2-I multi-step
-// loop), which in turn uses only ToolRegistry.execute() with the existing
-// permission gate and AbortSignal propagation.
+// Every step still executes through the existing Agent Core (P2-I
+// multi-step loop) via ToolRegistry.execute() with the existing permission
+// gate and AbortSignal propagation. This module adds NO new process,
+// filesystem, or git capability.
 //
 // Agent-owned step: { type, tool, input } where type is one of
-// inspect|status|test|command|edit and tool is allowlisted below. Plans
-// never carry free-form executables: command inputs come only from the
-// server-supplied `checks` argument and still pass command policy.
+// inspect|status|test|command|propose|apply and tool is allowlisted below.
+// Plans never carry free-form executables: command inputs come only from
+// the server-supplied `checks` argument and still pass command policy.
 //
 // Budgets (all hard): MAX_AGENT_STEPS = 12 total tool calls,
 // MAX_TEST_RUNS = 3 test_runner calls, MAX_CONTEXT_CALLS = 4 code_context
 // calls. Exhaustion yields code AGENT_STEP_LIMIT. Tool throws yield
 // AGENT_TOOL_FAILED. Abort rethrows ABORTED untouched.
 //
-// git_add / git_commit are never auto-called: they are rejected at plan
-// validation and require explicit user approval through the registry.
+// git_add / git_commit / filesystem.write are never auto-called: they are
+// rejected at plan validation and require explicit user approval through
+// the registry.
 const crypto = require('crypto');
 const defaultCore = require('../agent/core');
 const { WorkspaceService } = require('./workspaceService');
+const proposalService = require('./changeProposalService');
 
 const MAX_AGENT_STEPS = 12;
 const MAX_TEST_RUNS = 3;
@@ -29,8 +35,10 @@ const MAX_GOAL_CHARS = 2000;
 const MAX_EDITS = 10;
 const MAX_CHECKS = 5;
 
-// Tools the loop may invoke on its own. Write tools stay approval-gated
-// inside ToolRegistry; git_add/git_commit are deliberately absent.
+// Tools the loop may invoke on its own. Proposal tools replace direct
+// writes: the loop proposes and applies only via change_* tools, each
+// still gated by ToolRegistry. git_add/git_commit/filesystem writes are
+// deliberately absent.
 const AUTO_TOOLS = new Set([
     'code_context',
     'filesystem.read',
@@ -41,12 +49,14 @@ const AUTO_TOOLS = new Set([
     'git_branch',
     'command_execute',
     'test_runner',
-    'filesystem.write',
-    'filesystem.createDirectory'
+    'change_propose',
+    'change_get',
+    'change_apply',
+    'change_reject'
 ]);
 
-// Explicitly refused even if requested: staging/commit stay manual and
-// approval-bound; anything else git/destructive has no API surface here.
+// Explicitly refused even if requested: staging/commit/direct writes stay
+// manual and approval-bound; anything else destructive has no API here.
 const FORBIDDEN_TOOLS = new Set([
     'git_add',
     'git_commit',
@@ -56,10 +66,12 @@ const FORBIDDEN_TOOLS = new Set([
     'git_checkout',
     'git_restore',
     'git_merge',
-    'git_rebase'
+    'git_rebase',
+    'filesystem.write',
+    'filesystem.createDirectory'
 ]);
 
-const STEP_TYPES = new Set(['inspect', 'status', 'test', 'command', 'edit']);
+const STEP_TYPES = new Set(['inspect', 'status', 'test', 'command', 'propose', 'apply']);
 
 function loopError(status, code, message) {
     return Object.assign(new Error(message), { status, code });
@@ -104,10 +116,10 @@ function checkEdits(edits) {
         if (typeof e.path !== 'string' || !e.path.trim()) {
             throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}].path must be a non-empty string`);
         }
-        if (typeof e.content !== 'string') {
-            throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}].content must be a string`);
+        if (typeof e.content !== 'string' && e.content !== null) {
+            throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}].content must be a string or null (null deletes)`);
         }
-        return { path: e.path, content: e.content };
+        return { path: e.path, content: e.content === undefined ? null : e.content };
     });
 }
 
@@ -160,29 +172,26 @@ function validateSteps(steps) {
     });
 }
 
-// Edit paths are workspace-relative in the loop API but the existing
-// filesystem tools anchor at the sandbox root, so the loop prefixes the
-// server-resolved workspaceId (never caller input). The sandbox, approval
-// gate, and tool contract all still apply unchanged.
-function prefixEditPath(workspaceId, rel, index) {
-    if (rel.includes('\0') || /(^|[\/\\])\.\.([\/\\]|$)/.test(rel)) {
-        throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${index}].path must not contain traversal`);
-    }
-    if (/^[a-zA-Z]:/.test(rel) || rel.startsWith('\\\\')) {
-        throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${index}].path must be workspace-relative`);
-    }
-    const clean = rel.trim().replace(/^\/+/, '');
-    if (!clean || clean === '.' || clean.startsWith('-')) {
-        throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${index}].path is not a valid file path`);
-    }
-    return `${workspaceId}/${clean}`;
-}
-
 // Deterministic plan builder (no model, no free text -> command mapping):
-// inspect -> status -> checks -> baseline test -> edits -> verify test.
-function buildPlan({ goal, workspaceId = null, sessionId = null, edits = [], checks = [] } = {}) {
+// inspect -> status -> checks -> baseline test -> [propose].
+// Edits never become direct writes: at most one change_propose step is
+// appended. Verify tests run only on the resume path (proposalId), after
+// a human approval allowed change_apply to run.
+function buildPlan({ goal, workspaceId = null, sessionId = null, edits = [], checks = [], proposalId = null } = {}) {
     checkGoal(goal);
     const base = { workspaceId, sessionId };
+    if (proposalId !== undefined && proposalId !== null) {
+        if (typeof proposalId !== 'string' || !proposalId) {
+            throw loopError(400, 'TOOL_INVALID_INPUT', 'proposalId must be a non-empty string');
+        }
+        if (edits.length > 0) {
+            throw loopError(400, 'TOOL_INVALID_INPUT', 'edits and proposalId are mutually exclusive');
+        }
+        return validateSteps([
+            { type: 'apply', tool: 'change_apply', input: { proposalId } },
+            { type: 'test', tool: 'test_runner', input: { ...base } }
+        ]);
+    }
     const steps = [
         { type: 'inspect', tool: 'code_context', input: { ...base } },
         { type: 'status', tool: 'git_status', input: { ...base } }
@@ -191,11 +200,8 @@ function buildPlan({ goal, workspaceId = null, sessionId = null, edits = [], che
         steps.push({ type: 'command', tool: 'command_execute', input: { ...base, executable: c.executable, args: c.args } });
     }
     steps.push({ type: 'test', tool: 'test_runner', input: { ...base } });
-    for (const e of edits) {
-        steps.push({ type: 'edit', tool: 'filesystem.write', input: { path: e.path, content: e.content } });
-    }
     if (edits.length > 0) {
-        steps.push({ type: 'test', tool: 'test_runner', input: { ...base } });
+        steps.push({ type: 'propose', tool: 'change_propose', input: { ...base, changes: edits } });
     }
     return validateSteps(steps);
 }
@@ -228,7 +234,7 @@ function testSummaryFrom(record) {
     };
 }
 
-async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
+async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, proposalId = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
     checkAborted(signal);
     const who = checkOwner(owner);
     const text = checkGoal(goal);
@@ -240,21 +246,22 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     if (sessionId !== undefined && sessionId !== null && (typeof sessionId !== 'string' || !sessionId)) {
         throw loopError(400, 'TOOL_INVALID_INPUT', 'sessionId must be a non-empty string');
     }
+    if (proposalId !== undefined && proposalId !== null && (typeof proposalId !== 'string' || !proposalId)) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', 'proposalId must be a non-empty string');
+    }
     const core = (deps && deps.core) || defaultCore;
     const limits = (deps && deps.limits) || {};
     const maxSteps = limits.MAX_AGENT_STEPS || MAX_AGENT_STEPS;
     const maxTests = limits.MAX_TEST_RUNS || MAX_TEST_RUNS;
     const maxContexts = limits.MAX_CONTEXT_CALLS || MAX_CONTEXT_CALLS;
     // Owner-scoped workspace resolution up front: unknown or foreign
-    // workspaces fail before any tool runs. The resolved id (never caller
-    // text) anchors edit paths inside the existing filesystem sandbox.
+    // workspaces fail before any tool runs.
     const wsSvc = (deps && deps.workspaceService) || WorkspaceService.default();
-    let wsId = workspaceId;
     try {
-        if (wsId !== undefined && wsId !== null) {
-            wsId = (await wsSvc.getById(wsId, who)).workspaceId;
+        if (workspaceId !== undefined && workspaceId !== null) {
+            await wsSvc.getById(workspaceId, who);
         } else if (sessionId !== undefined && sessionId !== null) {
-            wsId = (await wsSvc.getCurrent(sessionId, who)).workspaceId;
+            await wsSvc.getCurrent(sessionId, who);
         } else {
             throw loopError(400, 'TOOL_INVALID_INPUT', 'workspaceId or sessionId is required');
         }
@@ -263,18 +270,41 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         return {
             ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
             goal: text, plan: [], steps: [], toolsUsed: [], tests: [],
+            proposalId: proposalId || null, proposalStatus: null,
             finalStatus: 'failed', failureReason: (e && e.message) || 'workspace resolution failed',
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
     }
-    const prefixedEdits = validEdits.map((e, i) => ({ path: prefixEditPath(wsId, e.path, i), content: e.content }));
-    const plan = buildPlan({ goal: text, workspaceId, sessionId, edits: prefixedEdits, checks: validChecks });
+    // Resume path: an already-created proposal is applied (human approval
+    // enforced by the registry gate on change_apply) and verified. The
+    // proposal itself is re-validated owner/session-side before use.
+    const resumeId = proposalId === undefined ? null : proposalId;
+    if (resumeId) {
+        try {
+            const current = await (async () => {
+                checkAborted(signal);
+                const svc = (deps && deps.proposals) || proposalService;
+                return svc.get({ proposalId: resumeId, owner: who, sessionId: sessionId === undefined ? null : sessionId, signal: signal || null });
+            })();
+            if (current.status !== 'pending') {
+                return finishResume([], [], `proposal is ${current.status}`, current.status, 'PROPOSAL_NOT_PENDING');
+            }
+        } catch (e) {
+            if (isAbortError(e)) throw e;
+            const msg = (e && e.message) || 'proposal lookup failed';
+            const code = e && typeof e.code === 'string' ? e.code : null;
+            return finishResume([], [], msg, null, code);
+        }
+    }
+    const plan = buildPlan({ goal: text, workspaceId, sessionId, edits: validEdits, checks: validChecks, proposalId: resumeId });
     const queue = plan.slice();
     const records = [];
     const toolsUsed = [];
     const tests = [];
     let contextCalls = 0;
     let testRuns = 0;
+    let createdProposalId = resumeId;
+    let createdProposalStatus = resumeId ? 'pending' : null;
 
     emit(onEvent, { type: 'message.started', sessionId });
 
@@ -290,7 +320,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         if (step.tool === 'test_runner' && testRuns >= maxTests) {
             return finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `test run limit reached (${maxTests})` });
         }
-        const callId = `p36-${records.length + 1}`;
+        const callId = `p37-${records.length + 1}`;
         emit(onEvent, { type: 'tool.started', tool: step.tool, callId });
         let out;
         try {
@@ -306,9 +336,13 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         } catch (e) {
             if (isAbortError(e)) throw e;
             const message = (e && e.message) || 'tool execution failed';
+            const errCode = e && typeof e.code === 'string' ? e.code : null;
             emit(onEvent, { type: 'tool.completed', tool: step.tool, callId });
+            if (errCode === 'PROPOSAL_STALE' || /PROPOSAL_STALE/.test(message)) {
+                emit(onEvent, { type: 'proposal_stale', proposalId: createdProposalId });
+            }
             emit(onEvent, { type: 'error', message });
-            return finish({ ok: false, code: 'AGENT_TOOL_FAILED', failureReason: message });
+            return finish({ ok: false, code: 'AGENT_TOOL_FAILED', failureReason: message, errorCode: errCode });
         }
         const rec = {
             id: callId,
@@ -326,11 +360,31 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         }
         emit(onEvent, { type: 'tool.completed', tool: step.tool, callId });
 
-        // Bounded re-inspect: a failing verify test re-queues one
-        // inspect + one test round while budgets last — never unbounded.
-        // The re-queue may exceed maxTests by one so the pop-check above
-        // reports AGENT_STEP_LIMIT instead of silently draining.
-        const isVerify = step.tool === 'test_runner' && validEdits.length > 0 && queue.length === 0;
+        // A freshly proposed change pauses the loop: the agent must not
+        // approve its own proposal. The caller resumes later with the
+        // proposalId plus a human approval.
+        if (step.tool === 'change_propose') {
+            const data = rec.result && typeof rec.result === 'object' ? rec.result : {};
+            const inner = data.result && typeof data.result === 'object' ? data.result : data;
+            createdProposalId = typeof inner.proposalId === 'string' ? inner.proposalId : null;
+            createdProposalStatus = typeof inner.status === 'string' ? inner.status : 'pending';
+            const files = Array.isArray(inner.changes) ? inner.changes.map((c) => c.path) : [];
+            emit(onEvent, { type: 'proposal_created', proposalId: createdProposalId, files });
+            emit(onEvent, { type: 'approval_required', proposalId: createdProposalId, status: createdProposalStatus });
+            return finish({
+                ok: false, code: 'APPROVAL_REQUIRED',
+                finalStatus: 'awaiting_approval',
+                failureReason: null,
+                proposalId: createdProposalId, proposalStatus: createdProposalStatus
+            });
+        }
+        if (step.tool === 'change_apply') {
+            emit(onEvent, { type: 'changes_applied', proposalId: createdProposalId });
+            createdProposalStatus = 'applied';
+        }
+        // Bounded re-inspect on the resume path: a failing post-apply
+        // test re-queues one inspect + one test round while budgets last.
+        const isVerify = step.tool === 'test_runner' && resumeId && queue.length === 0;
         const lastTest = tests.length ? tests[tests.length - 1] : null;
         if (isVerify && lastTest && !lastTest.ok && testRuns <= maxTests && records.length + 2 <= maxSteps) {
             queue.push(
@@ -341,7 +395,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         }
     }
 
-    // Verdict reflects the LAST test (post-edit verify), not the
+    // Verdict reflects the LAST test (post-apply verify), not the
     // diagnostic baseline: a fixed-then-green run is completed.
     const lastTest = tests.length ? tests[tests.length - 1] : null;
     if (lastTest && !lastTest.ok) {
@@ -349,7 +403,26 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     }
     return finish({ ok: true, code: 'AGENT_COMPLETED', finalStatus: 'completed', failureReason: null });
 
-    function finish({ ok, code, finalStatus = ok ? 'completed' : 'failed', failureReason = null }) {
+    function finishResume(stepsDone, toolsDone, failureReason, proposalStatus, errorCode = null) {
+        return {
+            ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
+            goal: text, plan: planSummary(), steps: stepsDone, toolsUsed: toolsDone, tests: [],
+            proposalId: resumeId, proposalStatus,
+            finalStatus: 'failed', failureReason, errorCode,
+            limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
+        };
+    }
+
+    function planSummary() {
+        try {
+            return buildPlan({ goal: text, workspaceId, sessionId, edits: validEdits, checks: validChecks, proposalId: resumeId })
+                .map((s) => ({ type: s.type, tool: s.tool }));
+        } catch {
+            return [];
+        }
+    }
+
+    function finish({ ok, code, finalStatus = ok ? 'completed' : 'failed', failureReason = null, errorCode = null, proposalId = createdProposalId, proposalStatus = createdProposalStatus }) {
         const result = {
             ok,
             code,
@@ -360,8 +433,11 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             steps: records,
             toolsUsed,
             tests,
+            proposalId,
+            proposalStatus,
             finalStatus,
             failureReason,
+            errorCode,
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
         emit(onEvent, { type: 'message.completed', sessionId, mcpTools: toolsUsed });

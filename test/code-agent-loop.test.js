@@ -1,4 +1,5 @@
-// P3-6 Code Agent Loop tests.
+// P3-6 Code Agent Loop tests (P3-7: edits go through change_propose and
+// pause with APPROVAL_REQUIRED; resume via proposalId + human approval).
 //
 // Unit tests cover plan building/validation/budgets with an injected stub
 // core. Integration tests use the REAL Agent Core + ToolRegistry against
@@ -46,6 +47,10 @@ function stubCore(script = {}, hooks = {}) {
 const failTests = () => ({ ok: false, code: 'TEST_FAILED', exitCode: 1 });
 const passTests = () => ({ ok: true, code: 'TEST_PASS', exitCode: 0 });
 
+// Fake proposal lookup for stub-core resume runs.
+const fakeProp = (status = 'pending') => ({
+    async get() { return { proposalId: 'prop_1', status, workspaceId: 'ws_1', changes: [] }; }
+});
 // Fake owner-scoped workspace resolution for stub-core runs (no disk).
 const fakeWs = (id = 'ws_1') => ({
     async getById(wid) { return { workspaceId: wid }; },
@@ -86,10 +91,14 @@ describe('P3-6 plan building', () => {
         assert.deepEqual(plan.map((s) => s.tool), ['code_context', 'git_status', 'test_runner']);
         assert.deepEqual(plan.map((s) => s.type), ['inspect', 'status', 'test']);
     });
-    it('2 plan with edits adds edit steps plus verify test', () => {
+    it('2 plan with edits appends one propose step (no direct writes)', () => {
         const plan = loop.buildPlan({ goal: 'fix it', workspaceId: 'ws_x', edits: [{ path: 'a.js', content: '1' }] });
-        assert.deepEqual(plan.map((s) => s.tool), ['code_context', 'git_status', 'test_runner', 'filesystem.write', 'test_runner']);
-        assert.equal(plan[3].input.path, 'a.js');
+        assert.deepEqual(plan.map((s) => s.tool), ['code_context', 'git_status', 'test_runner', 'change_propose']);
+        assert.deepEqual(plan[3].input.changes, [{ path: 'a.js', content: '1' }]);
+    });
+    it('2b resume plan is apply + verify', () => {
+        const plan = loop.buildPlan({ goal: 'fix it', workspaceId: 'ws_x', proposalId: 'prop_1' });
+        assert.deepEqual(plan.map((s) => s.tool), ['change_apply', 'test_runner']);
     });
     it('3 plan with checks adds command steps', () => {
         const plan = loop.buildPlan({ goal: 'check', checks: [{ executable: 'node', args: ['--version'] }] });
@@ -109,9 +118,9 @@ describe('P3-6 plan validation', () => {
         assert.throws(() => loop.validateSteps([{ type: 'nope', tool: 'code_context' }]), (e) => e.code === 'PLANNING_ERROR');
         assert.throws(() => loop.validateSteps([{ type: 'inspect' }]), (e) => e.code === 'PLANNING_ERROR');
     });
-    it('6 forbidden tools rejected (git_add / git_commit)', () => {
-        for (const tool of ['git_add', 'git_commit']) {
-            assert.throws(() => loop.validateSteps([{ type: 'edit', tool, input: {} }]), (e) => e.code === 'PLANNING_ERROR', tool);
+    it('6 forbidden tools rejected (git_add / git_commit / direct writes)', () => {
+        for (const tool of ['git_add', 'git_commit', 'filesystem.write', 'filesystem.createDirectory']) {
+            assert.throws(() => loop.validateSteps([{ type: 'apply', tool, input: {} }]), (e) => e.code === 'PLANNING_ERROR', tool);
         }
     });
     it('7 unknown tools rejected', () => {
@@ -147,46 +156,52 @@ describe('P3-6 bounded execution (stub core)', () => {
         assert.equal(out.tests.length, 1);
         assert.equal(out.tests[0].code, 'TEST_PASS');
     });
-    it('12 multi-step execution with edits', async () => {
-        const core = stubCore({ test_runner: passTests() });
+    it('12 edits pause at APPROVAL_REQUIRED (no direct write)', async () => {
+        const core = stubCore({
+            test_runner: passTests(),
+            change_propose: { result: { proposalId: 'prop_9', status: 'pending', changes: [{ path: 'a.js' }] } }
+        });
         const out = await loop.run({
             workspaceId: 'ws_1', owner: 'alice', goal: 'fix it',
             edits: [{ path: 'a.js', content: '1' }, { path: 'b.js', content: '2' }],
             deps: D(core)
         });
-        assert.equal(core.calls.length, 6);
-        assert.deepEqual(out.toolsUsed, ['code_context', 'git_status', 'test_runner', 'filesystem.write']);
-        assert.equal(out.tests.length, 2);
+        assert.equal(out.ok, false);
+        assert.equal(out.code, 'APPROVAL_REQUIRED');
+        assert.equal(out.proposalId, 'prop_9');
+        assert.equal(out.proposalStatus, 'pending');
+        assert.deepEqual(out.toolsUsed, ['code_context', 'git_status', 'test_runner', 'change_propose']);
+        const names = core.calls.map((c) => c.opts.steps[0].name);
+        assert.ok(!names.includes('filesystem.write'));
+        assert.ok(!names.includes('change_apply'));
     });
     it('13 bounded MAX_AGENT_STEPS', async () => {
         const core = stubCore({ test_runner: passTests() });
         const edits = Array.from({ length: 8 }, (_, i) => ({ path: `f${i}.js`, content: 'x' }));
         const out = await loop.run({
             workspaceId: 'ws_1', owner: 'alice', goal: 'big fix', edits,
-            deps: D(core, { limits: { MAX_AGENT_STEPS: 6, MAX_TEST_RUNS: 3, MAX_CONTEXT_CALLS: 4 } })
+            deps: D(core, { limits: { MAX_AGENT_STEPS: 3, MAX_TEST_RUNS: 3, MAX_CONTEXT_CALLS: 4 } })
         });
         assert.equal(out.ok, false);
         assert.equal(out.code, 'AGENT_STEP_LIMIT');
-        assert.ok(out.failureReason.includes('6'));
-        assert.equal(out.steps.length, 6);
-        assert.equal(core.calls.length, 6);
+        assert.ok(out.failureReason.includes('3'));
+        assert.equal(out.steps.length, 3);
+        assert.equal(core.calls.length, 3);
     });
-    it('14 MAX_TEST_RUNS limit', async () => {
+    it('14 MAX_TEST_RUNS limit (resume path)', async () => {
         const core = stubCore({ test_runner: failTests() });
         const out = await loop.run({
-            workspaceId: 'ws_1', owner: 'alice', goal: 'fix',
-            edits: [{ path: 'a.js', content: '1' }],
-            deps: D(core, { limits: { MAX_AGENT_STEPS: 12, MAX_TEST_RUNS: 1, MAX_CONTEXT_CALLS: 4 } })
+            workspaceId: 'ws_1', owner: 'alice', goal: 'fix', proposalId: 'prop_1',
+            deps: D(core, { limits: { MAX_AGENT_STEPS: 12, MAX_TEST_RUNS: 1, MAX_CONTEXT_CALLS: 4 }, proposals: fakeProp() })
         });
         assert.equal(out.code, 'AGENT_STEP_LIMIT');
         assert.ok(out.failureReason.includes('test run limit'));
     });
-    it('15 MAX_CONTEXT_CALLS limit', async () => {
+    it('15 MAX_CONTEXT_CALLS limit (resume path)', async () => {
         const core = stubCore({ test_runner: failTests() });
         const out = await loop.run({
-            workspaceId: 'ws_1', owner: 'alice', goal: 'fix',
-            edits: [{ path: 'a.js', content: '1' }],
-            deps: D(core, { limits: { MAX_AGENT_STEPS: 12, MAX_TEST_RUNS: 3, MAX_CONTEXT_CALLS: 1 } })
+            workspaceId: 'ws_1', owner: 'alice', goal: 'fix', proposalId: 'prop_1',
+            deps: D(core, { limits: { MAX_AGENT_STEPS: 12, MAX_TEST_RUNS: 3, MAX_CONTEXT_CALLS: 1 }, proposals: fakeProp() })
         });
         assert.equal(out.code, 'AGENT_STEP_LIMIT');
         assert.ok(out.failureReason.includes('context call limit'));
@@ -210,17 +225,22 @@ describe('P3-6 bounded execution (stub core)', () => {
         assert.equal(out.ok, false);
         assert.equal(out.code, 'AGENT_TOOL_FAILED');
     });
-    it('18 git_add / git_commit never auto-called', async () => {
-        const core = stubCore({ test_runner: passTests() });
+    it('18 git_add / git_commit / direct writes never auto-called', async () => {
+        const core = stubCore({
+            test_runner: passTests(),
+            change_propose: { result: { proposalId: 'prop_9', status: 'pending', changes: [] } }
+        });
         const out = await loop.run({
             workspaceId: 'ws_1', owner: 'alice', goal: 'fix and commit please',
             edits: [{ path: 'a.js', content: '1' }],
             deps: D(core)
         });
         const names = core.calls.map((c) => c.opts.steps[0].name);
-        assert.ok(!names.includes('git_add'));
-        assert.ok(!names.includes('git_commit'));
+        for (const banned of ['git_add', 'git_commit', 'filesystem.write', 'filesystem.createDirectory', 'change_apply']) {
+            assert.ok(!names.includes(banned), banned);
+        }
         assert.ok(!out.toolsUsed.includes('git_add'));
+        assert.equal(out.code, 'APPROVAL_REQUIRED');
     });
     it('19 approval forwarded to core context', async () => {
         const core = stubCore({ test_runner: passTests() });
@@ -297,15 +317,14 @@ describe('P3-6 results + events (stub core)', () => {
         assert.equal(out.finalStatus, 'tests_failing');
         assert.ok(out.failureReason.includes('TEST_FAILED'));
     });
-    it('27 verify-fail re-inspect stays bounded', async () => {
+    it('27 resume verify-fail re-inspect stays bounded', async () => {
         const core = stubCore({ test_runner: failTests() });
         const out = await loop.run({
-            workspaceId: 'ws_1', owner: 'alice', goal: 'fix',
-            edits: [{ path: 'a.js', content: '1' }],
-            deps: D(core)
+            workspaceId: 'ws_1', owner: 'alice', goal: 'fix', proposalId: 'prop_1',
+            deps: D(core, { proposals: fakeProp() })
         });
         assert.ok(core.calls.length <= 12);
-        assert.ok(out.tests.length >= 2, 'verify ran at least twice (baseline + verify)');
+        assert.ok(out.tests.length >= 2, 'verify ran at least twice (apply-verify + re-inspect)');
         assert.ok(['AGENT_STEP_LIMIT', 'AGENT_COMPLETED'].includes(out.code));
     });
     it('28 SSE-compatible event contract', async () => {
@@ -363,6 +382,9 @@ describe('P3-6 regression + real integration', () => {
         assert.ok(!/execFile\s*\(/.test(src));
         assert.ok(!/[^a-zA-Z]exec\s*\(/.test(src));
         assert.ok(!/gitService|commandService|testRunnerService/.test(src), 'must go through core/registry, not services directly');
+        assert.ok(!loop.AUTO_TOOLS.has('filesystem.write'), 'loop must not auto-write');
+        assert.ok(loop.FORBIDDEN_TOOLS.has('filesystem.write'), 'direct writes are forbidden plans');
+        assert.ok(loop.AUTO_TOOLS.has('change_propose') && loop.AUTO_TOOLS.has('change_apply'));
     });
     it('31 real loop completes on a passing fixture', async () => {
         toolRegistry._clearForTests();
@@ -379,28 +401,43 @@ describe('P3-6 regression + real integration', () => {
         assert.equal(out.tests[0].code, 'TEST_PASS');
         assert.ok(out.toolsUsed.includes('code_context'));
     });
-    it('32 real edit flips a failing fixture to passing', async () => {
+    it('32 real propose-pause-resume flips a failing fixture (no direct write)', async () => {
         toolRegistry._clearForTests();
         const ws = await WorkspaceService.default().create({ sessionId: sid(), owner: 'alice' });
         await writeFixture(ws.rootPath, 'target.txt', 'broken\n');
-        registerRealExceptTestRunner(async () => {
-            const v = (await fsp.readFile(path.join(ws.rootPath, 'target.txt'), 'utf8')).trim();
-            const pass = v === 'fixed';
-            return {
-                result: { ok: pass, code: pass ? 'TEST_PASS' : 'TEST_FAILED', workspaceId: ws.workspaceId, command: { executable: 'npm', args: ['test'] }, exitCode: pass ? 0 : 1, stdout: '', stderr: '', timedOut: false, durationMs: 1, truncated: false },
-                mcpTools: ['test_runner']
-            };
-        });
-        const out = await loop.run({
-            workspaceId: ws.workspaceId, sessionId: ws.sessionId, owner: 'alice',
-            goal: 'fix the failing tests', edits: [{ path: 'target.txt', content: 'fixed\n' }],
-            approval: APPROVAL
-        });
-        assert.equal(out.finalStatus, 'completed');
-        assert.ok(out.tests.length >= 2);
-        assert.equal(out.tests[0].code, 'TEST_FAILED');
-        assert.equal(out.tests[out.tests.length - 1].code, 'TEST_PASS');
-        const content = await fsp.readFile(path.join(ws.rootPath, 'target.txt'), 'utf8');
-        assert.equal(content, 'fixed\n');
+        const { codeContext } = require('../src/services/tools/codecontext');
+        const gitTools = require('../src/services/tools/git');
+        const changeTools = require('../src/services/tools/changeProposal');
+        const { defineTool } = require('../src/services/tools/tool');
+        for (const t of [codeContext, gitTools.gitStatus, changeTools.changePropose, changeTools.changeGet, changeTools.changeApply, changeTools.changeReject]) {
+            toolRegistry.register(t);
+        }
+        toolRegistry.register(defineTool({
+            name: 'test_runner',
+            capabilities: ['test.run'],
+            description: 'Stub test_runner reading the real fixture file.',
+            inputSchema: { type: 'object', properties: {} },
+            readOnly: false,
+            needsApproval: true,
+            execute: async () => {
+                const v = (await fsp.readFile(path.join(ws.rootPath, 'target.txt'), 'utf8')).trim();
+                const pass = v === 'fixed';
+                return {
+                    result: { ok: pass, code: pass ? 'TEST_PASS' : 'TEST_FAILED', exitCode: pass ? 0 : 1 },
+                    mcpTools: ['test_runner']
+                };
+            }
+        }));
+        const base = { workspaceId: ws.workspaceId, sessionId: ws.sessionId, owner: 'alice', goal: 'fix the failing tests' };
+        const paused = await loop.run({ ...base, edits: [{ path: 'target.txt', content: 'fixed\n' }], approval: APPROVAL });
+        assert.equal(paused.code, 'APPROVAL_REQUIRED');
+        assert.ok(typeof paused.proposalId === 'string' && paused.proposalId.startsWith('prop_'));
+        assert.equal(paused.proposalStatus, 'pending');
+        assert.equal((await fsp.readFile(path.join(ws.rootPath, 'target.txt'), 'utf8')), 'broken\n');
+        const done = await loop.run({ ...base, proposalId: paused.proposalId, approval: APPROVAL });
+        assert.equal(done.code, 'AGENT_COMPLETED');
+        assert.equal(done.finalStatus, 'completed');
+        assert.equal(done.tests[done.tests.length - 1].code, 'TEST_PASS');
+        assert.equal((await fsp.readFile(path.join(ws.rootPath, 'target.txt'), 'utf8')), 'fixed\n');
     });
 });

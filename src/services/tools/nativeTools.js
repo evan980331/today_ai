@@ -18,8 +18,9 @@ const { codeContext } = require('./codecontext');
 const { commandExecute } = require('./command');
 const { testRunner } = require('./testrunner');
 const { gitStatus, gitDiff, gitLog, gitBranch, gitAdd, gitCommit } = require('./git');
+const { changePropose, changeGet, changeApply, changeReject } = require('./changeProposal');
 
-const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests, filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory, codeContext, commandExecute, testRunner, gitStatus, gitDiff, gitLog, gitBranch, gitAdd, gitCommit];
+const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests, filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory, codeContext, commandExecute, testRunner, gitStatus, gitDiff, gitLog, gitBranch, gitAdd, gitCommit, changePropose, changeGet, changeApply, changeReject];
 const NATIVE_TOOL_NAMES = NATIVE_TOOLS.map((t) => t.name);
 
 function registerNativeTools(registry) {
