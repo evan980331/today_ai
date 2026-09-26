@@ -69,6 +69,11 @@ async function sendMessageStream(text, loadingId) {
     let bubble = null;
     let fullText = '';
     let handled = false;
+    // Set once any tool/command activity arrives. The first text chunk after
+    // activity starts the final answer: separate it from earlier status
+    // narration with one blank line (consumed after a single use, so later
+    // chunks and multi-line Markdown pass through untouched).
+    let sawToolActivity = false;
     // P1-1 activity state: dedupe by callId/partId
     let activityBox = null;
     let activityList = null;
@@ -159,11 +164,20 @@ async function sendMessageStream(text, loadingId) {
                 let obj;
                 try { obj = JSON.parse(data); } catch { continue; }
                 if (ev === 'text.delta' && obj.content) {
-                    fullText += obj.content;
-                    if (!bubble) bubble = appendStreamingMessage();
+                    let chunk = obj.content;
+                    if (!bubble) {
+                        bubble = appendStreamingMessage();
+                        sawToolActivity = false; // nothing narrated yet: no separator needed
+                    } else if (sawToolActivity && /\S/.test(bubble.textContent) && /\S/.test(chunk) &&
+                        !bubble.textContent.endsWith('\n\n') && !/^\s/.test(chunk)) {
+                        chunk = '\n\n' + chunk;
+                        sawToolActivity = false;
+                    }
+                    fullText += chunk;
                     bubble.textContent = fullText;
                     scrollToBottom();
                 } else if (ev === 'tool.started' || ev === 'tool.completed' || ev === 'command.started' || ev === 'command.completed') {
+                    sawToolActivity = true;
                     upsertActivity(obj);
                 } else if (ev === 'message.completed' || ev === 'done') {
                     finalizeActivity();
@@ -406,15 +420,11 @@ let currentStreamController = null;
 // text node so chunks can update it incrementally (textContent = XSS-safe).
 function appendStreamingMessage() {
     const wrapper = document.createElement('div');
-    wrapper.className = 'flex space-x-3 justify-start min-w-0';
-    const icon = document.createElement('div');
-    icon.className = 'w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1';
-    icon.textContent = 'T';
+    wrapper.className = 'flex justify-start min-w-0';
     const bubble = document.createElement('div');
     bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-[min(36rem,85vw)] md:max-w-xl leading-relaxed shadow-md whitespace-pre-wrap break-words overflow-wrap-anywhere min-w-0';
     bubble.style.overflowWrap = 'anywhere';
     bubble.textContent = '';
-    wrapper.appendChild(icon);
     wrapper.appendChild(bubble);
     messagesDiv.appendChild(wrapper);
     scrollToBottom();
@@ -423,7 +433,7 @@ function appendStreamingMessage() {
 
 function appendMessage(role, content) {
     const wrapper = document.createElement('div');
-    wrapper.className = `flex space-x-3 ${role === 'user' ? 'justify-end' : 'justify-start'} min-w-0`;
+    wrapper.className = `${role === 'user' ? 'justify-end' : 'justify-start'} flex min-w-0`;
     if (role === 'user') {
         const div = document.createElement('div');
         div.className = 'bg-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 text-sm max-w-[min(28rem,85vw)] md:max-w-lg shadow-md whitespace-pre-wrap break-words min-w-0';
@@ -431,14 +441,10 @@ function appendMessage(role, content) {
         div.textContent = content;
         wrapper.appendChild(div);
     } else {
-        const icon = document.createElement('div');
-        icon.className = 'w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1';
-        icon.textContent = 'T';
         const bubble = document.createElement('div');
         bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-[min(36rem,85vw)] md:max-w-xl leading-relaxed shadow-md whitespace-pre-wrap break-words min-w-0';
         bubble.style.overflowWrap = 'anywhere';
         bubble.textContent = content;
-        wrapper.appendChild(icon);
         wrapper.appendChild(bubble);
     }
     messagesDiv.appendChild(wrapper);
@@ -449,9 +455,8 @@ function appendLoading() {
     const id = 'loading-' + Date.now();
     const wrapper = document.createElement('div');
     wrapper.id = id;
-    wrapper.className = 'flex space-x-3 justify-start';
+    wrapper.className = 'flex justify-start';
     wrapper.innerHTML = `
-        <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-xs text-white shrink-0 mt-1">T</div>
         <div class="bg-slate-900 border border-slate-800 text-slate-400 rounded-2xl rounded-tl-none px-4 py-3 text-sm flex items-center space-x-2">
             <span class="animate-pulse">OpenCode 正在處理並調用 MCP 工具...</span>
         </div>
