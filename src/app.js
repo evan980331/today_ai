@@ -11,6 +11,7 @@ const debugEnvRouter = require('./routes/debugEnv'); // TEMPORARY diagnostic, to
 const chatRouter = require('./routes/chat');
 const streamRouter = require('./routes/stream');
 const sessionsRouter = require('./routes/sessions');
+const workspacesRouter = require('./routes/workspaces');
 const { authMiddleware, loginHandler, logoutHandler, meHandler } = require('./middleware/auth');
 const { loginLimiter } = require('./middleware/rateLimit');
 
@@ -72,6 +73,7 @@ app.get('/api/auth/me', meHandler);
 app.use('/api', chatRouter);
 app.use('/api', streamRouter);
 app.use('/api', sessionsRouter);
+app.use('/api', workspacesRouter);
 
 // Consistent error handler
 // eslint-disable-next-line no-unused-vars

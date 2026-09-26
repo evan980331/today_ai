@@ -74,6 +74,23 @@ async function initDb() {
         `;
         await s`CREATE INDEX IF NOT EXISTS idx_auth_users_username ON auth_users (username)`;
         console.log('[DB] auth_users table ready');
+        // P3-1: workspace entity store. Additive table only; existing schemas
+        // untouched. session_id+owner scoping enforces per-session isolation;
+        // repository is a JSONB identity blob (no clone/checkout here).
+        await s`
+            CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                repository JSONB,
+                root_path TEXT NOT NULL,
+                status TEXT CHECK (status IN ('active','archived')) NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `;
+        await s`CREATE INDEX IF NOT EXISTS idx_workspaces_session_owner ON workspaces (session_id, owner, updated_at DESC)`;
+        console.log('[DB] workspaces table ready');
     } catch (e) {
         console.error('[DB] init failed:', e.message);
         // Do not crash server on DB failure
@@ -315,10 +332,69 @@ async function deleteAuthUser(username) {
     await withRetry(() => s`DELETE FROM auth_users WHERE username = ${username}`);
 }
 
+async function createWorkspaceRow({ id, sessionId, owner, repository = null, rootPath, status = 'active' }) {
+    const s = getSql();
+    if (!s) throw new Error('DATABASE_URL not configured');
+    const rows = await withRetry(() => s`
+        INSERT INTO workspaces (id, session_id, owner, repository, root_path, status)
+        VALUES (${id}, ${sessionId}, ${owner}, ${repository ? JSON.stringify(repository) : null}::jsonb, ${rootPath}, ${status})
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id, session_id AS "sessionId", owner, repository, root_path AS "rootPath", status,
+                  created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+async function getWorkspaceRow(id) {
+    const s = getSql();
+    if (!s) return null;
+    const rows = await withRetry(() => s`
+        SELECT id, session_id AS "sessionId", owner, repository, root_path AS "rootPath", status,
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM workspaces WHERE id = ${id}
+    `);
+    return rows[0] || null;
+}
+
+async function getActiveWorkspaceBySession(sessionId, owner) {
+    const s = getSql();
+    if (!s) return null;
+    const rows = await withRetry(() => s`
+        SELECT id, session_id AS "sessionId", owner, repository, root_path AS "rootPath", status,
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM workspaces WHERE session_id = ${sessionId} AND owner = ${owner} AND status = 'active'
+        ORDER BY updated_at DESC LIMIT 1
+    `);
+    return rows[0] || null;
+}
+
+async function updateWorkspaceRow(id, { repository, status }) {
+    const s = getSql();
+    if (!s) throw new Error('DATABASE_URL not configured');
+    const rows = await withRetry(() => s`
+        UPDATE workspaces
+        SET repository = COALESCE(${repository !== undefined ? JSON.stringify(repository) : null}::jsonb, repository),
+            status = COALESCE(${status !== undefined ? status : null}, status),
+            updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING id, session_id AS "sessionId", owner, repository, root_path AS "rootPath", status,
+                  created_at AS "createdAt", updated_at AS "updatedAt"
+    `);
+    return rows[0] || null;
+}
+
+// Test/maintenance cleanup only — the product lifecycle archives, never deletes.
+async function deleteWorkspaceRow(id) {
+    const s = getSql();
+    if (!s) return;
+    await withRetry(() => s`DELETE FROM workspaces WHERE id = ${id}`);
+}
+
 module.exports = {
     getSql, initDb, saveLog, getSessions, getHistory, deleteSession, ping, withRetry,
     AGENT_STATUS, createAgentSession, getAgentSession, updateAgentSessionStatus,
     listAgentSessions, deleteAgentSession,
     saveAuthSession, findAuthSession, deleteAuthSession,
-    findAuthUserByUsername, createAuthUser, upsertAuthUser, countAuthUsers, deleteAuthUser
+    findAuthUserByUsername, createAuthUser, upsertAuthUser, countAuthUsers, deleteAuthUser,
+    createWorkspaceRow, getWorkspaceRow, getActiveWorkspaceBySession, updateWorkspaceRow, deleteWorkspaceRow
 };
