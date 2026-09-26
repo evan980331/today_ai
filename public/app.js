@@ -81,18 +81,13 @@ async function sendMessageStream(text, loadingId) {
     function ensureActivityBox() {
         if (activityBox) return;
         const wrap = document.createElement('div');
-        wrap.className = 'flex space-x-3 justify-start';
-        const icon = document.createElement('div');
-        icon.className = 'w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center font-bold text-xs text-slate-400 shrink-0 mt-1';
-        icon.innerHTML = '<i data-lucide="loader-circle" class="w-4 h-4 animate-spin"></i>';
-        try { if (window.lucide) lucide.createIcons({ nodes: [icon] }); } catch {}
+        wrap.className = 'flex justify-start';
         activityBox = document.createElement('div');
         activityBox.className = 'bg-slate-900/60 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-400 max-w-xl w-full leading-relaxed shadow-sm space-y-1 overflow-hidden';
         activityBox.innerHTML = '<div class="flex items-center gap-2 text-[11px] tracking-wider text-slate-500 uppercase"><span class="w-2 h-2 rounded-full bg-amber-400/60 animate-pulse shrink-0"></span>背景活動</div>';
         activityList = document.createElement('div');
         activityList.className = 'space-y-1 pt-1';
         activityBox.appendChild(activityList);
-        wrap.appendChild(icon);
         wrap.appendChild(activityBox);
         messagesDiv.appendChild(wrap);
         activityBox._wrap = wrap;
