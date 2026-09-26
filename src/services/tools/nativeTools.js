@@ -15,8 +15,10 @@ const { calendarListCalendars, calendarListEvents, calendarGetEvent } = require(
 const { githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests } = require('./github');
 const { filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory } = require('./filesystem');
 const { codeContext } = require('./codecontext');
+const { commandExecute } = require('./command');
+const { testRunner } = require('./testrunner');
 
-const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests, filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory, codeContext];
+const NATIVE_TOOLS = [calculator, gmailSearch, gmailGetMessage, gmailListThreads, calendarListCalendars, calendarListEvents, calendarGetEvent, githubSearchRepositories, githubGetRepository, githubListIssues, githubListPullRequests, filesystemRead, filesystemList, filesystemWrite, filesystemCreateDirectory, codeContext, commandExecute, testRunner];
 const NATIVE_TOOL_NAMES = NATIVE_TOOLS.map((t) => t.name);
 
 function registerNativeTools(registry) {
