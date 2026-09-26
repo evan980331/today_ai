@@ -132,7 +132,10 @@
                 <div class="flex items-center justify-between pt-2 border-t border-slate-800/50 px-2 gap-2">
                     <span class="text-xs text-slate-500 hidden sm:inline">提示：Enter 發送，Shift+Enter 換行</span>
                     <span class="text-xs text-slate-500 sm:hidden">Enter 發送</span>
-                    <button type="button" onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-xl transition flex items-center justify-center shrink-0 min-w-[44px] min-h-[44px] touch-manipulation pointer-events-auto relative z-10">
+                    <button type="button" id="stop-button" onclick="stopExecution()" class="bg-red-600 hover:bg-red-500 text-white p-2 rounded-xl transition items-center justify-center shrink-0 min-w-[44px] min-h-[44px] touch-manipulation pointer-events-auto relative z-10" style="display:none" aria-label="終止">
+                        <i data-lucide="square" class="w-4 h-4">■</i>
+                    </button>
+                    <button type="button" id="send-button" onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-xl transition flex items-center justify-center shrink-0 min-w-[44px] min-h-[44px] touch-manipulation pointer-events-auto relative z-10">
                         <i data-lucide="arrow-up" class="w-4 h-4">↑</i>
                     </button>
                 </div>

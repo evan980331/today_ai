@@ -26,6 +26,7 @@ function toggleSidebar() {
 }
 window.toggleSidebar = toggleSidebar;
 async function sendMessage() {
+    if (isRunning) return; // running lock: one execution at a time
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 8000) {
@@ -37,35 +38,71 @@ async function sendMessage() {
     appendMessage('user', text);
     input.value = '';
 
-    // Abort any previous in-flight stream before starting a new one.
-    if (currentStreamController) {
-        try { currentStreamController.abort(); } catch {}
-        currentStreamController = null;
-    }
+    // Single controller per execution; Stop button aborts this one.
+    const controller = new AbortController();
+    currentStreamController = controller;
+    setRunning(true);
 
     const loadingId = appendLoading();
     try {
-        const streamed = await sendMessageStream(text, loadingId);
+        const streamed = await sendMessageStream(text, loadingId, controller);
         if (streamed) return;
         // Fallback: legacy non-streaming endpoint (kept for compatibility).
-        await sendMessageLegacy(text, loadingId);
+        await sendMessageLegacy(text, loadingId, controller.signal);
     } finally {
         removeLoading(loadingId);
+        setRunning(false);
+        if (currentStreamController === controller) currentStreamController = null;
         try { input.disabled = false; } catch {}
         // Do not steal focus if user is typing, but ensure input is usable
         try { if (document.activeElement !== input) input.focus(); } catch {}
-        if (currentStreamController) {
-            try { currentStreamController.abort(); } catch {}
-            currentStreamController = null;
-        }
     }
+}
+
+// User-pressed Stop: abort the in-flight request/stream only.
+// Cleanup + state restore happen in sendMessage's finally.
+function stopExecution() {
+    const c = currentStreamController;
+    if (!c || !isRunning) return;
+    setStopping(true);
+    try { c.abort(); } catch {}
+}
+window.stopExecution = stopExecution;
+
+function setRunning(on) {
+    isRunning = on;
+    try {
+        const sendBtn = document.getElementById('send-button');
+        const stopBtn = document.getElementById('stop-button');
+        if (sendBtn) {
+            sendBtn.disabled = on;
+            sendBtn.style.display = on ? 'none' : '';
+            sendBtn.classList.toggle('flex', !on);
+        }
+        if (stopBtn) {
+            stopBtn.style.display = on ? 'flex' : 'none';
+            stopBtn.disabled = false;
+            stopBtn.innerHTML = '<i data-lucide="square" class="w-4 h-4">■</i>';
+            if (window.lucide) lucide.createIcons();
+        }
+        if (input) input.disabled = on;
+    } catch {}
+}
+
+function setStopping() {
+    try {
+        const stopBtn = document.getElementById('stop-button');
+        if (stopBtn) {
+            stopBtn.disabled = true;
+            stopBtn.innerHTML = '<span class="text-xs font-medium px-1">停止中…</span>';
+        }
+    } catch {}
 }
 
 // Streaming path: POST /api/chat/stream (SSE). Returns true when the
 // stream endpoint handled the request (success or clean error).
-async function sendMessageStream(text, loadingId) {
-    const controller = new AbortController();
-    currentStreamController = controller;
+async function sendMessageStream(text, loadingId, controller) {
+    if (!controller) return false;
     let bubble = null;
     let fullText = '';
     let handled = false;
@@ -115,10 +152,12 @@ async function sendMessageStream(text, loadingId) {
         if (o.type === 'tool.completed') return `✓ ${t}${id}`;
         return `▸ ${t}${id}`;
     }
-    function finalizeActivity() {
+    function finalizeActivity(aborted) {
         if (!activityBox) return;
         const header = activityBox.querySelector('div');
-        if (header) header.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400/60 shrink-0 inline-block"></span> 已完成 · ' + activityMap.size + ' 項活動';
+        if (aborted) {
+            if (header) header.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-500 shrink-0 inline-block"></span> 已終止';
+        } else if (header) header.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400/60 shrink-0 inline-block"></span> 已完成 · ' + activityMap.size + ' 項活動';
         // keep as history, slightly dim
         activityBox.classList.add('opacity-80');
     }
@@ -180,9 +219,10 @@ async function sendMessageStream(text, loadingId) {
                     if (bubble) bubble.textContent = fullText || bubble.textContent;
                     loadSessions();
                 } else if (ev === 'error') {
-                    finalizeActivity();
+                    const aborted = obj.code === 'ABORTED' || obj.message === 'aborted';
+                    finalizeActivity(aborted);
                     if (!bubble) bubble = appendStreamingMessage();
-                    bubble.textContent = `錯誤：${obj.message || '未知錯誤'}`;
+                    bubble.textContent = aborted ? '已終止。' : `錯誤：${obj.message || '未知錯誤'}`;
                 }
             }
         };
@@ -201,7 +241,8 @@ async function sendMessageStream(text, loadingId) {
     } catch (err) {
         if (err && err.name === 'AbortError') {
             removeLoading(loadingId);
-            appendMessage('ai', '已取消生成。');
+            finalizeActivity(true);
+            appendMessage('ai', '已終止。');
             return true;
         }
         if (!handled) return false; // network-level failure: try legacy path
@@ -213,12 +254,13 @@ async function sendMessageStream(text, loadingId) {
     }
 }
 
-async function sendMessageLegacy(text, loadingId) {
+async function sendMessageLegacy(text, loadingId, signal) {
     try {
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
+            signal: signal || undefined,
             body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
         });
         const data = await res.json().catch(() => ({}));
@@ -254,11 +296,15 @@ async function sendMessageLegacy(text, loadingId) {
         }
     } catch (err) {
         removeLoading(loadingId);
+        if (err && err.name === 'AbortError') {
+            appendMessage('ai', '已終止。');
+            return;
+        }
         appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。');
     }
 }
 window.sendMessage = sendMessage;
-window.usePrompt = function(t) { const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
+window.usePrompt = function(t) { if (isRunning) return; const el=document.getElementById('user-input'); if(el){el.value=t; window.sendMessage();} };
 try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
 
 try { if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); } catch {}
@@ -368,7 +414,7 @@ if (input) input.addEventListener('keydown', (e) => {
     if (e.isComposing) return;
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        window.sendMessage();
+        if (!isRunning) window.sendMessage();
     }
 });
 } catch {}
@@ -408,6 +454,7 @@ function toggleSidebar() {
 window.toggleSidebar = toggleSidebar;
 
 let currentStreamController = null;
+let isRunning = false;
 
 
 
