@@ -36,12 +36,14 @@ for (const file of listJs(path.join(ROOT, 'src'))) {
     }
 }
 
-// 2. no process spawning outside the worker/runtime/git boundary
+// 2. no process spawning outside the worker/runtime/git/command boundary
 const SPAWN_ALLOWED = [
     'src/services/opencode.js',
     'src/services/agentWorker.js',
     'src/services/agentClient.js',
-    'src/services/git.js'
+    'src/services/git.js',
+    // P3-3: allowlisted executable spawns (never shell strings) live here.
+    'src/services/commandService.js'
 ].map((p) => path.join(ROOT, p));
 const spawnRe = /(^|[^A-Za-z0-9_.])(spawn|execFile|exec)\s*\(/;
 for (const file of listJs(path.join(ROOT, 'src'))) {
