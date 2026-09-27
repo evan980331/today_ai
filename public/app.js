@@ -26,46 +26,74 @@ function toggleSidebar() {
 }
 window.toggleSidebar = toggleSidebar;
 async function sendMessage() {
-    if (isRunning) return; // running lock: one execution at a time
+    const space = getActiveSpace() || getSpace('general');
+    const spaceId = space ? space.spaceId : 'general';
+    // Global single-flight: at most one agent execution system-wide.
+    if (activeExecution) {
+        appendSystemMessage(spaceId, `目前 ${getSpaceName(activeExecution.spaceId)} Agent 正在執行，請等待完成或停止目前任務。`);
+        updateWelcomeVisibility();
+        return;
+    }
+    if (isRunning) return; // transitional guard, kept in sync with activeExecution
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 8000) {
-        appendMessage('ai', '訊息過長 (max 8000)');
+        appendMessage('ai', '訊息過長 (max 8000)', spaceId);
         return;
     }
 
     welcomeSection.classList.add('hidden');
-    appendMessage('user', text);
+    appendMessage('user', text, spaceId);
     input.value = '';
 
-    // Single controller per execution; Stop button aborts this one.
+    // The controller belongs to the execution, not to the visible space:
+    // switching spaces never cancels it.
     const controller = new AbortController();
+    const execution = {
+        executionId: 'ex-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1296).toString(36),
+        spaceId,
+        sessionId: getSpaceSession(spaceId),
+        controller,
+        status: 'running'
+    };
+    activeExecution = execution;
     currentStreamController = controller;
     setRunning(true);
+    refreshSpaces();
 
-    const loadingId = appendLoading();
+    const loadingId = appendLoading(spaceId);
     try {
-        const streamed = await sendMessageStream(text, loadingId, controller);
+        const streamed = await sendMessageStream(text, loadingId, controller, execution);
         if (streamed) return;
         // Fallback: legacy non-streaming endpoint (kept for compatibility).
-        await sendMessageLegacy(text, loadingId, controller.signal);
+        await sendMessageLegacy(text, loadingId, controller.signal, execution);
     } finally {
         removeLoading(loadingId);
-        setRunning(false);
+        if (activeExecution && activeExecution.executionId === execution.executionId) activeExecution = null;
         if (currentStreamController === controller) currentStreamController = null;
+        setRunning(false);
+        refreshSpaces();
         try { input.disabled = false; } catch {}
         // Do not steal focus if user is typing, but ensure input is usable
         try { if (document.activeElement !== input) input.focus(); } catch {}
     }
 }
 
-// User-pressed Stop: abort the in-flight request/stream only.
-// Cleanup + state restore happen in sendMessage's finally.
+// User-pressed Stop: aborts the active execution wherever it runs, not
+// merely whatever space is on screen. Proposals stay untouched.
 function stopExecution() {
-    const c = currentStreamController;
-    if (!c || !isRunning) return;
+    const ex = activeExecution;
+    if (!ex) {
+        const c = currentStreamController;
+        if (!c || !isRunning) return;
+        setStopping(true);
+        try { c.abort(); } catch {}
+        return;
+    }
+    ex.status = 'stopping';
     setStopping(true);
-    try { c.abort(); } catch {}
+    refreshSpaces();
+    try { ex.controller.abort(); } catch {}
 }
 window.stopExecution = stopExecution;
 
@@ -99,10 +127,13 @@ function setStopping() {
     } catch {}
 }
 
-// Streaming path: POST /api/chat/stream (SSE). Returns true when the
-// stream endpoint handled the request (success or clean error).
-async function sendMessageStream(text, loadingId, controller) {
+// Streaming path: POST /api/chat/stream (SSE). Events belong to the
+// execution's space (resolved via execution/session, never activeSpaceId);
+// DOM updates land in #messages only when that space is on screen,
+// otherwise they accumulate on detached nodes shown on switch-back.
+async function sendMessageStream(text, loadingId, controller, execution) {
     if (!controller) return false;
+    const execSpaceId = (execution && execution.spaceId) || activeSpaceId;
     let bubble = null;
     let fullText = '';
     let handled = false;
@@ -126,7 +157,7 @@ async function sendMessageStream(text, loadingId, controller) {
         activityList.className = 'space-y-1 pt-1';
         activityBox.appendChild(activityList);
         wrap.appendChild(activityBox);
-        messagesDiv.appendChild(wrap);
+        spaceAppend(execSpaceId, wrap);
         activityBox._wrap = wrap;
     }
     function upsertActivity(obj) {
@@ -150,6 +181,11 @@ async function sendMessageStream(text, loadingId, controller) {
         const t = (o.tool || o.type || 'tool').toLowerCase();
         const id = o.callId ? ` · ${o.callId.slice(0,8)}` : '';
         if (o.type === 'tool.completed') return `✓ ${t}${id}`;
+        if (typeof o.type === 'string' && o.type.indexOf('checkpoint_') === 0) {
+            const label = o.type.slice('checkpoint_'.length);
+            const cp = o.checkpointId ? ` · ${String(o.checkpointId).slice(0, 13)}` : '';
+            return `◈ checkpoint ${label}${cp}`;
+        }
         return `▸ ${t}${id}`;
     }
     function finalizeActivity(aborted) {
@@ -167,12 +203,12 @@ async function sendMessageStream(text, loadingId, controller) {
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             signal: controller.signal,
-            body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
+            body: JSON.stringify({ prompt: text, sessionId: (execution && execution.sessionId) || getSpaceSession(execSpaceId) })
         });
         if (res.status === 401) {
             removeLoading(loadingId);
             loginOverlay.classList.remove('hidden');
-            appendMessage('ai', '未授權 (401)：請先登入');
+            appendMessage('ai', '未授權 (401)：請先登入', execSpaceId);
             return true;
         }
         const ctype = res.headers.get('content-type') || '';
@@ -197,10 +233,16 @@ async function sendMessageStream(text, loadingId, controller) {
                 if (!data) continue;
                 let obj;
                 try { obj = JSON.parse(data); } catch { continue; }
+                // Route every event to its owning space: explicit sessionId
+                // first, then existing proposal cards, then this execution.
+                // Background spaces accumulate state; only the active space
+                // touches #messages.
+                const targetSpace = resolveEventSpace(obj, execution);
+                const isLive = targetSpace === activeSpaceId;
                 if (ev === 'text.delta' && obj.content) {
                     let chunk = obj.content;
                     if (!bubble) {
-                        bubble = appendStreamingMessage();
+                        bubble = appendStreamingMessage(targetSpace);
                         sawToolActivity = false; // nothing narrated yet: no separator needed
                     } else if (sawToolActivity && /\S/.test(bubble.textContent) && /\S/.test(chunk) &&
                         !bubble.textContent.endsWith('\n\n') && !/^\s/.test(chunk)) {
@@ -209,7 +251,7 @@ async function sendMessageStream(text, loadingId, controller) {
                     }
                     fullText += chunk;
                     bubble.textContent = fullText;
-                    scrollToBottom();
+                    if (isLive) scrollToBottom();
                 } else if (ev === 'tool.started' || ev === 'tool.completed' || ev === 'command.started' || ev === 'command.completed') {
                     sawToolActivity = true;
                     upsertActivity(obj);
@@ -218,19 +260,28 @@ async function sendMessageStream(text, loadingId, controller) {
                     // The agent run is NOT complete while cards are pending.
                     sawToolActivity = true;
                     if (obj.proposalId) {
-                        if (obj.changes && obj.changes.length) renderProposalCard(obj);
-                        else fetchProposalAndRender(obj.proposalId);
+                        if (obj.changes && obj.changes.length) renderProposalCard(obj, targetSpace);
+                        else fetchProposalAndRender(obj.proposalId, targetSpace);
                     }
                 } else if (ev === 'changes_applied' || ev === 'proposal_approved' || ev === 'proposal_rejected' || ev === 'proposal_stale') {
                     sawToolActivity = true;
                     updateProposalCard(obj);
+                } else if (typeof ev === 'string' && ev.indexOf('checkpoint_') === 0) {
+                    sawToolActivity = true;
+                    try {
+                        upsertActivity(Object.assign({ type: ev }, obj));
+                    } catch {
+                        upsertActivity(obj);
+                    }
                 } else if (ev === 'message.completed' || ev === 'done') {
                     finalizeActivity();
-                    if (!bubble && fullText) bubble = appendStreamingMessage();
-                    if (bubble) bubble.textContent = fullText || bubble.textContent;
+                    if (!bubble && fullText) bubble = appendStreamingMessage(targetSpace);
+                    // Streaming showed plain text; the final render is Markdown.
+                    if (bubble && fullText) renderMarkdownInto(bubble, fullText);
+                    else if (bubble) bubble.textContent = fullText || bubble.textContent;
                     let pendingCards = 0;
                     try {
-                        proposalCards.forEach((entry) => { if (entry.state === 'pending') pendingCards += 1; });
+                        proposalCards.forEach((entry) => { if (entry.state === 'pending' && entry.spaceId === targetSpace) pendingCards += 1; });
                     } catch {}
                     if (pendingCards > 0) {
                         const note = `有 ${pendingCards} 項修改等待批准，請在上方卡片中批准或拒絕。`;
@@ -238,13 +289,13 @@ async function sendMessageStream(text, loadingId, controller) {
                         try {
                             messagesDiv.childNodes.forEach((node) => { if (node.textContent === note) duplicate = true; });
                         } catch {}
-                        if (!duplicate) appendMessage('ai', note);
+                        if (!duplicate) appendMessage('ai', note, targetSpace);
                     }
-                    loadSessions();
+                    refreshSpaces();
                 } else if (ev === 'error') {
                     const aborted = obj.code === 'ABORTED' || obj.message === 'aborted';
                     finalizeActivity(aborted);
-                    if (!bubble) bubble = appendStreamingMessage();
+                    if (!bubble) bubble = appendStreamingMessage(targetSpace);
                     bubble.textContent = aborted ? '已終止。' : `錯誤：${obj.message || '未知錯誤'}`;
                 }
             }
@@ -258,40 +309,42 @@ async function sendMessageStream(text, loadingId, controller) {
         buf += decoder.decode();
         flushEvents();
         if (!bubble && !fullText) {
-            appendMessage('ai', '執行完成，但沒有收到回應內容。');
+            appendMessage('ai', '執行完成，但沒有收到回應內容。', execSpaceId);
         }
         return true;
     } catch (err) {
         if (err && err.name === 'AbortError') {
             removeLoading(loadingId);
             finalizeActivity(true);
-            appendMessage('ai', '已終止。');
+            appendMessage('ai', '已終止。', execSpaceId);
             return true;
         }
         if (!handled) return false; // network-level failure: try legacy path
         removeLoading(loadingId);
-        if (!bubble) appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。');
+        if (!bubble) appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', execSpaceId);
         return true;
     } finally {
         if (currentStreamController === controller) currentStreamController = null;
     }
 }
 
-async function sendMessageLegacy(text, loadingId, signal) {
+async function sendMessageLegacy(text, loadingId, signal, execution) {
+    const spaceId = (execution && execution.spaceId) || activeSpaceId;
+    const sessionId = (execution && execution.sessionId) || getSpaceSession(spaceId);
     try {
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             signal: signal || undefined,
-            body: JSON.stringify({ prompt: text, sessionId: currentSessionId })
+            body: JSON.stringify({ prompt: text, sessionId })
         });
         const data = await res.json().catch(() => ({}));
         removeLoading(loadingId);
         if (!res.ok) {
             if (res.status === 401) {
                 loginOverlay.classList.remove('hidden');
-                appendMessage('ai', '未授權 (401)：請先登入');
+                appendMessage('ai', '未授權 (401)：請先登入', spaceId);
                 return;
             }
             let msg = `錯誤 ${res.status}: ${escapeHtml(data.error || '未知錯誤')}`;
@@ -300,30 +353,22 @@ async function sendMessageLegacy(text, loadingId, signal) {
             else if (res.status === 503) msg = 'OpenCode runtime 暫時不可用 (503)：請稍後重試';
             else if (res.status === 500) msg = `執行失敗 (500)：${escapeHtml((data.details || data.error || '').slice(0,300))}`;
             else if (data.details) msg += `\n${escapeHtml(data.details.slice(0,300))}`;
-            appendMessage('ai', msg);
-            if (data.sessionId) {
-                currentSessionId = data.sessionId;
-                localStorage.setItem('todayai_session', currentSessionId);
-            }
+            appendMessage('ai', msg, spaceId);
             return;
         }
         if (data.result) {
-            appendMessage('ai', data.result);
-            if (data.sessionId && data.sessionId !== currentSessionId) {
-                currentSessionId = data.sessionId;
-                localStorage.setItem('todayai_session', currentSessionId);
-            }
-            loadSessions();
+            appendMessage('ai', data.result, spaceId);
+            refreshSpaces();
         } else {
-            appendMessage('ai', '執行失敗：' + escapeHtml(data.error || '無回應'));
+            appendMessage('ai', '執行失敗：' + escapeHtml(data.error || '無回應'), spaceId);
         }
     } catch (err) {
         removeLoading(loadingId);
         if (err && err.name === 'AbortError') {
-            appendMessage('ai', '已終止。');
+            appendMessage('ai', '已終止。', spaceId);
             return;
         }
-        appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。');
+        appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', spaceId);
     }
 }
 window.sendMessage = sendMessage;
@@ -338,19 +383,14 @@ if (_cd) _cd.innerText = new Date().toLocaleDateString('zh-TW', {
 });
 } catch {}
 
-let currentSessionId;
-try {
-currentSessionId = (() => {
-    const v = localStorage.getItem('todayai_session');
-    // Validate stored sessionId is UUID or safe
-    if (v && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)) return v;
-    if (v && /^[a-zA-Z0-9._\-]{1,128}$/.test(v)) return v;
-    const id = crypto.randomUUID();
-    localStorage.setItem('todayai_session', id);
-    return id;
-})();
-if (!localStorage.getItem('todayai_session')) localStorage.setItem('todayai_session', currentSessionId);
-} catch(e) { console.warn('init error', e); }
+// Space identity/session regexes live here (before first use at load
+// time) so top-level initialization never hits TDZ in any host.
+const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const SPACE_SESSION_RE = /^[a-zA-Z0-9._\-]{1,128}$/;
+const SPACE_UUID_RE = /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+let spaceSessions = loadSpaceSessions();
+let activeSpaceId = loadActiveSpaceId();
 
 // --- Auth (Cookie Session, HttpOnly) ---
 const loginOverlay = document.getElementById('login-overlay');
@@ -397,8 +437,8 @@ async function doLogin() {
         // Verify session
         const me = await fetch('/api/auth/me', { credentials: 'include' });
         if (me.ok) {
-            loadHistory();
-            loadSessions();
+            refreshSpaces();
+            loadHistoryForSpace(activeSpaceId);
         }
     } catch (e) {
         loginErrorEl.textContent = '連線失敗';
@@ -411,12 +451,20 @@ async function doLogout() {
     try {
         await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } catch {}
-    // Clear UI state but not password
+    // Reset per-space UI state (spaces/sessions persist for next login).
+    try {
+        activeExecution = null;
+        currentStreamController = null;
+        for (const k of Object.keys(spaceViews)) delete spaceViews[k];
+        proposalCards.clear();
+        clearContainer(messagesDiv);
+    } catch {}
     messagesDiv.innerHTML = '';
     welcomeSection.classList.remove('hidden');
     loginOverlay.classList.remove('hidden');
     loginUserEl.value = '';
     loginPassEl.value = '';
+    refreshSpaces();
 }
 window.doLogout = doLogout;
 
@@ -430,7 +478,6 @@ if (loginUserEl && loginPassEl) {
 const input = document.getElementById('user-input');
 const messagesDiv = document.getElementById('messages');
 const welcomeSection = document.getElementById('welcome-section');
-const sessionListEl = document.getElementById('session-list');
 
 try {
 if (input) input.addEventListener('keydown', (e) => {
@@ -483,7 +530,8 @@ let isRunning = false;
 
 // Streaming AI bubble: same styling as appendMessage('ai'), but returns the
 // text node so chunks can update it incrementally (textContent = XSS-safe).
-function appendStreamingMessage() {
+function appendStreamingMessage(spaceId) {
+    const target = spaceId || activeSpaceId;
     const wrapper = document.createElement('div');
     wrapper.className = 'flex justify-start min-w-0';
     const bubble = document.createElement('div');
@@ -491,32 +539,42 @@ function appendStreamingMessage() {
     bubble.style.overflowWrap = 'anywhere';
     bubble.textContent = '';
     wrapper.appendChild(bubble);
-    messagesDiv.appendChild(wrapper);
-    scrollToBottom();
+    spaceAppend(target, wrapper);
+    if (target === activeSpaceId) scrollToBottom();
     return bubble;
 }
 
-function appendMessage(role, content) {
+function appendMessage(role, content, spaceId) {
+    const target = spaceId || activeSpaceId;
     const wrapper = document.createElement('div');
-    wrapper.className = `${role === 'user' ? 'justify-end' : 'justify-start'} flex min-w-0`;
     if (role === 'user') {
+        wrapper.className = 'justify-end flex min-w-0';
         const div = document.createElement('div');
         div.className = 'bg-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 text-sm max-w-[min(28rem,85vw)] md:max-w-lg shadow-md whitespace-pre-wrap break-words min-w-0';
         div.style.overflowWrap = 'anywhere';
         div.textContent = content;
         wrapper.appendChild(div);
+    } else if (role === 'system') {
+        wrapper.className = 'flex justify-center min-w-0';
+        const div = document.createElement('div');
+        div.className = 'text-xs text-slate-500 px-3 py-1.5 max-w-[min(36rem,85vw)] text-center break-words';
+        div.style.overflowWrap = 'anywhere';
+        div.textContent = content;
+        wrapper.appendChild(div);
     } else {
+        wrapper.className = 'justify-start flex min-w-0';
         const bubble = document.createElement('div');
         bubble.className = 'bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl rounded-tl-none px-4 py-3 text-sm max-w-[min(36rem,85vw)] md:max-w-xl leading-relaxed shadow-md whitespace-pre-wrap break-words min-w-0';
         bubble.style.overflowWrap = 'anywhere';
-        bubble.textContent = content;
+        // AI content renders as Markdown; user/system stay plain text.
+        renderMarkdownInto(bubble, content);
         wrapper.appendChild(bubble);
     }
-    messagesDiv.appendChild(wrapper);
-    scrollToBottom();
+    spaceAppend(target, wrapper);
+    if (target === activeSpaceId) scrollToBottom();
 }
 
-function appendLoading() {
+function appendLoading(spaceId) {
     const id = 'loading-' + Date.now();
     const wrapper = document.createElement('div');
     wrapper.id = id;
@@ -526,115 +584,78 @@ function appendLoading() {
             <span class="animate-pulse">OpenCode 正在處理並調用 MCP 工具...</span>
         </div>
     `;
-    messagesDiv.appendChild(wrapper);
-    scrollToBottom();
+    loadingNodes[id] = wrapper;
+    spaceAppend(spaceId || activeSpaceId, wrapper);
+    if ((spaceId || activeSpaceId) === activeSpaceId) scrollToBottom();
     return id;
 }
 
+const loadingNodes = {};
+
 function removeLoading(id) {
-    const el = document.getElementById(id);
-    if (el) el.remove();
+    const tracked = loadingNodes[id];
+    if (tracked) {
+        try { tracked.remove(); } catch {}
+        try { delete loadingNodes[id]; } catch {}
+        return;
+    }
+    try {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+    } catch {}
 }
 
 async function loadHistory() {
-    messagesDiv.innerHTML = '';
-    try {
-        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}&limit=100`, { credentials: 'include' });
-        if (res.status === 401) { loginOverlay.classList.remove('hidden'); return; }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const rows = await res.json();
-        if (Array.isArray(rows) && rows.length > 0) {
-            welcomeSection.classList.add('hidden');
-            rows.forEach(r => appendMessage(r.role === 'user' ? 'user' : 'ai', r.content));
-        } else {
-            welcomeSection.classList.remove('hidden');
-        }
-    } catch(e) { console.warn('history load failed', e); }
-}
-
-async function loadSessions() {
-    try {
-        const res = await fetch('/api/sessions?limit=50', { credentials: 'include' });
-        if (res.status === 401) { document.getElementById('session-count').textContent = '需登入'; return; }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const sessions = await res.json();
-        document.getElementById('session-count').textContent = sessions.length ? `${sessions.length} 則` : '';
-        if (!Array.isArray(sessions) || sessions.length === 0) {
-            sessionListEl.innerHTML = '<div class="text-xs text-slate-500 px-2 py-2">尚無對話</div>';
-            return;
-        }
-        sessionListEl.innerHTML = '';
-        sessions.forEach(s => {
-            const isActive = s.session_id === currentSessionId;
-            const row = document.createElement('div');
-            row.className = `group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition ${isActive ? 'bg-slate-800 text-indigo-300 border border-slate-700' : 'hover:bg-slate-800/60 text-slate-400 hover:text-slate-200'}`;
-            row.dataset.sessionId = s.session_id;
-            row.addEventListener('click', () => switchSession(s.session_id));
-
-            const left = document.createElement('div');
-            left.className = 'flex-1 min-w-0 text-left';
-            const title = document.createElement('div');
-            title.className = 'text-xs font-medium truncate';
-            title.textContent = (s.preview || '(空對話)').slice(0, 28);
-            const meta = document.createElement('div');
-            meta.className = 'text-[10px] opacity-60 truncate';
-            const date = new Date(s.updated_at).toLocaleDateString('zh-TW', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
-            meta.textContent = `${s.msg_count} 則 · ${date}`;
-            left.appendChild(title);
-            left.appendChild(meta);
-
-            const delBtn = document.createElement('button');
-            delBtn.className = 'opacity-0 group-hover:opacity-100 ml-2 p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400 transition';
-            delBtn.title = '刪除';
-            delBtn.innerHTML = '<i data-lucide="trash-2" class="w-3.5 h-3.5"></i>';
-            delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteSession(s.session_id); });
-
-            row.appendChild(left);
-            row.appendChild(delBtn);
-            sessionListEl.appendChild(row);
-        });
-        lucide.createIcons();
-    } catch(e) { sessionListEl.innerHTML = '<div class="text-xs text-red-400 px-2">載入失敗</div>'; }
+    return loadHistoryForSpace(activeSpaceId);
 }
 
 function switchSession(id) {
-    if (!/^[a-zA-Z0-9._\-]{1,128}$/.test(id) && !/^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
-        console.warn('Invalid sessionId', id);
-        return;
-    }
-    currentSessionId = id;
-    localStorage.setItem('todayai_session', id);
-    loadHistory();
-    loadSessions();
+    // Legacy single-session API kept as a shim: route to the space that
+    // owns the session, or fall back to the active space.
+    try {
+        if (typeof id === 'string' && id) {
+            const sp = spaceBySession(id);
+            if (sp && sp !== activeSpaceId) { switchSpace(sp); return; }
+        }
+    } catch {}
+    loadHistoryForSpace(activeSpaceId);
+    refreshSpaces();
 }
 window.switchSession = switchSession;
 
 function createNewSession() {
-    currentSessionId = crypto.randomUUID();
-    localStorage.setItem('todayai_session', currentSessionId);
-    messagesDiv.innerHTML = '';
-    welcomeSection.classList.remove('hidden');
-    loadSessions();
+    // Legacy "new chat" maps to clearing the active space view and
+    // reloading its server history.
+    try {
+        const view = spaceView(activeSpaceId);
+        view.nodes = [];
+        view.historyLoaded = false;
+        clearContainer(messagesDiv);
+    } catch {}
+    updateWelcomeVisibility();
+    loadHistoryForSpace(activeSpaceId);
 }
 window.createNewSession = createNewSession;
 
-async function deleteSession(id) {
-    if (!confirm('確定刪除此對話？')) return;
-    try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' });
-        if (res.status === 401) { loginOverlay.classList.remove('hidden'); return; }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch(e) { console.warn('delete failed', e); }
-    if (id === currentSessionId) createNewSession();
-    else loadSessions();
+async function deleteSession() {
+    // Server-side session deletion is out of scope for Spaces; clearing
+    // the active view is the safe local equivalent. Kept for compat.
+    createNewSession();
 }
 window.deleteSession = deleteSession;
 window.clearChat = createNewSession;
 
+async function loadSessions() {
+    // Sidebar no longer lists server sessions (Spaces own the identity);
+    // keep the name as a harmless refresh hook.
+    refreshSpaces();
+}
+
 checkAuth().then(ok => {
+    refreshSpaces();
+    updateActiveSpaceHeader();
     if (ok) {
-        loadHistory();
-        loadSessions();
+        loadHistoryForSpace(activeSpaceId);
     }
 });
 
@@ -642,6 +663,303 @@ function scrollToBottom() {
     const container = document.getElementById('chat-container');
     container.scrollTop = container.scrollHeight;
 }
+
+function escapeHtml(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// --- Safe Markdown renderer (no dependencies) ---
+// Builds DOM exclusively with createElement + textContent: model/user
+// text is NEVER assigned to innerHTML and never parsed as HTML, so raw
+// <script>/<img onerror>/<div onclick> payloads render as inert text.
+// Returns an Array of nodes (stub-DOM compatible, no DocumentFragment).
+function mdText(str) {
+    if (typeof document.createTextNode === 'function') {
+        try { return document.createTextNode(str); } catch {}
+    }
+    const s = document.createElement('span');
+    s.textContent = str;
+    return s;
+}
+
+function mdEl(tag, cls, parent) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (parent) parent.appendChild(el);
+    return el;
+}
+
+// Only these schemes may become clickable links. Everything else
+// (javascript:, data:, vbscript:, file:, ...) renders as plain text.
+function isSafeMarkdownUrl(url) {
+    if (typeof url !== 'string') return false;
+    const u = url.trim();
+    return /^(https?:\/\/|mailto:)/i.test(u);
+}
+
+// Inline: `code`, **bold**, *italic*, [text](url). Single pass over a
+// token regex; unmatched text stays verbatim. Link text recurses one
+// level for nested bold/italic/code.
+function renderInlineInto(parent, str) {
+    const src = String(str == null ? '' : str);
+    const parts = src.split('\n');
+    for (let li = 0; li < parts.length; li++) {
+        if (li > 0) parent.appendChild(document.createElement('br'));
+        renderInlineTokens(parent, parts[li]);
+    }
+}
+
+function renderInlineTokens(parent, str) {
+    const re = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^)\s]+(?:\s+"[^"]*")?\))/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+        if (m.index > last) parent.appendChild(mdText(str.slice(last, m.index)));
+        const tok = m[0];
+        if (tok.charAt(0) === '`') {
+            const code = mdEl('code', 'bg-slate-950 border border-slate-800 rounded px-1 font-mono text-[12px]', parent);
+            code.textContent = tok.slice(1, -1);
+        } else if (tok.charAt(0) === '*' && tok.charAt(1) === '*') {
+            const b = mdEl('strong', '', parent);
+            renderInlinePlain(b, tok.slice(2, -2));
+        } else if (tok.charAt(0) === '*') {
+            const em = mdEl('em', '', parent);
+            renderInlinePlain(em, tok.slice(1, -1));
+        } else {
+            appendMarkdownLink(parent, tok);
+        }
+        last = m.index + tok.length;
+    }
+    if (last < str.length) parent.appendChild(mdText(str.slice(last)));
+}
+
+// Plain pass for nested content: bold/italic/code only, no links.
+function renderInlinePlain(parent, str) {
+    const re = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*)/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+        if (m.index > last) parent.appendChild(mdText(str.slice(last, m.index)));
+        const tok = m[0];
+        if (tok.charAt(0) === '`') {
+            const code = mdEl('code', 'bg-slate-950 border border-slate-800 rounded px-1 font-mono text-[12px]', parent);
+            code.textContent = tok.slice(1, -1);
+        } else if (tok.charAt(0) === '*' && tok.charAt(1) === '*') {
+            const b = mdEl('strong', '', parent);
+            b.textContent = tok.slice(2, -2);
+        } else {
+            const em = mdEl('em', '', parent);
+            em.textContent = tok.slice(1, -1);
+        }
+        last = m.index + tok.length;
+    }
+    if (last < str.length) parent.appendChild(mdText(str.slice(last)));
+}
+
+function appendMarkdownLink(parent, tok) {
+    const m = tok.match(/^\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/);
+    if (!m || !isSafeMarkdownUrl(m[2])) {
+        parent.appendChild(mdText(tok));
+        return;
+    }
+    const a = document.createElement('a');
+    a.className = 'text-indigo-300 underline break-words';
+    try {
+        a.href = m[2].trim();
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+    } catch {}
+    renderInlinePlain(a, m[1]);
+    parent.appendChild(a);
+}
+
+function mdHeadingCls(level) {
+    if (level === 1) return 'text-lg font-bold text-slate-100 mt-1 mb-1';
+    if (level === 2) return 'text-base font-bold text-slate-100 mt-1 mb-1';
+    return 'text-sm font-bold text-slate-100 mt-1 mb-1';
+}
+
+function buildCodeBlock(code, lang) {
+    const wrap = document.createElement('div');
+    wrap.className = 'my-2 min-w-0';
+    const bar = document.createElement('div');
+    bar.className = 'flex items-center justify-between bg-slate-950 border border-slate-800 border-b-0 rounded-t-lg px-2 py-1';
+    const langEl = document.createElement('span');
+    langEl.className = 'text-[11px] text-slate-500 font-mono';
+    langEl.textContent = (lang || '').trim() || 'code';
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'text-[11px] text-slate-300 bg-slate-800 hover:bg-slate-700 rounded px-3 min-h-[44px]';
+    copyBtn.textContent = '複製';
+    copyBtn.addEventListener('click', () => {
+        try {
+            const clip = (typeof navigator !== 'undefined' && navigator.clipboard) ? navigator.clipboard : null;
+            if (clip && typeof clip.writeText === 'function') {
+                const done = clip.writeText(code);
+                if (done && typeof done.catch === 'function') done.catch(() => {});
+            }
+        } catch {}
+    });
+    bar.appendChild(langEl);
+    bar.appendChild(copyBtn);
+    wrap.appendChild(bar);
+    const pre = document.createElement('pre');
+    pre.className = 'bg-slate-950 border border-slate-800 rounded-b-lg p-2 overflow-x-auto max-w-full font-mono text-[12px] leading-relaxed';
+    pre.style.whiteSpace = 'pre';
+    const codeEl = document.createElement('code');
+    codeEl.textContent = code;
+    pre.appendChild(codeEl);
+    wrap.appendChild(pre);
+    return wrap;
+}
+
+function isMdBlockStart(line, nextLine) {
+    if (/^```\w*\s*$/.test(line)) return true;
+    if (/^#{1,3}\s+/.test(line)) return true;
+    if (/^>\s?/.test(line)) return true;
+    if (/^([-*+])\s+/.test(line)) return true;
+    if (/^\d+[.)]\s+/.test(line)) return true;
+    if (line.includes('|') && typeof nextLine === 'string' && /-/.test(nextLine) && /^\s*\|?[\s:|-]+\|?[\s:|-]*$/.test(nextLine)) return true;
+    return false;
+}
+
+function buildMdTable(headerLine, bodyLines) {
+    const splitRow = (l) => {
+        let t = l.trim();
+        if (t.charAt(0) === '|') t = t.slice(1);
+        if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+        return t.split('|').map((c) => c.trim());
+    };
+    const wrap = document.createElement('div');
+    wrap.className = 'overflow-x-auto max-w-full my-2';
+    const table = document.createElement('table');
+    table.className = 'text-xs border-collapse min-w-full';
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    for (const cell of splitRow(headerLine)) {
+        const th = document.createElement('th');
+        th.className = 'border border-slate-700 bg-slate-800 px-2 py-1 text-left font-semibold whitespace-nowrap';
+        th.textContent = cell;
+        hr.appendChild(th);
+    }
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (const bl of bodyLines) {
+        const tr = document.createElement('tr');
+        for (const cell of splitRow(bl)) {
+            const td = document.createElement('td');
+            td.className = 'border border-slate-800 px-2 py-1 whitespace-nowrap';
+            td.textContent = cell;
+            tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+}
+
+// Block parser: headings, ul/ol, blockquote, table, fenced code,
+// paragraphs. Returns an Array of nodes.
+function renderMarkdown(text) {
+    const nodes = [];
+    const lines = String(text == null ? '' : text).split('\n');
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        if (/^\s*$/.test(line)) { i++; continue; }
+        let m;
+        if ((m = line.match(/^```(\w*)\s*$/))) {
+            const buf = [];
+            i++;
+            while (i < lines.length && !/^```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+            i++;
+            nodes.push(buildCodeBlock(buf.join('\n'), m[1]));
+            continue;
+        }
+        if ((m = line.match(/^(#{1,3})\s+(.*)$/))) {
+            const h = document.createElement('h' + m[1].length);
+            h.className = mdHeadingCls(m[1].length);
+            renderInlineInto(h, m[2]);
+            nodes.push(h);
+            i++;
+            continue;
+        }
+        if (/^>\s?/.test(line)) {
+            const buf = [];
+            while (i < lines.length && /^>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^>\s?/, '')); i++; }
+            const q = document.createElement('blockquote');
+            q.className = 'border-l-2 border-slate-600 pl-2 text-slate-300 my-1';
+            renderInlineInto(q, buf.join('\n'));
+            nodes.push(q);
+            continue;
+        }
+        if (/^([-*+])\s+/.test(line)) {
+            const ul = document.createElement('ul');
+            ul.className = 'list-disc pl-5 my-1 space-y-0.5';
+            while (i < lines.length) {
+                const lm = lines[i].match(/^([-*+])\s+(.*)$/);
+                if (!lm) break;
+                const li = document.createElement('li');
+                renderInlineInto(li, lm[2]);
+                ul.appendChild(li);
+                i++;
+            }
+            nodes.push(ul);
+            continue;
+        }
+        if ((m = line.match(/^(\d+)[.)]\s+(.*)$/))) {
+            const ol = document.createElement('ol');
+            ol.className = 'list-decimal pl-5 my-1 space-y-0.5';
+            while (i < lines.length) {
+                const lm = lines[i].match(/^\d+[.)]\s+(.*)$/);
+                if (!lm) break;
+                const li = document.createElement('li');
+                renderInlineInto(li, lm[1]);
+                ol.appendChild(li);
+                i++;
+            }
+            nodes.push(ol);
+            continue;
+        }
+        if (line.includes('|') && i + 1 < lines.length && /-/.test(lines[i + 1]) && /^\s*\|?[\s:|-]+\|?[\s:|-]*$/.test(lines[i + 1])) {
+            const body = [];
+            i += 2;
+            while (i < lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
+            nodes.push(buildMdTable(line, body));
+            continue;
+        }
+        const buf = [line];
+        i++;
+        while (i < lines.length && !/^\s*$/.test(lines[i]) && !isMdBlockStart(lines[i], lines[i + 1])) { buf.push(lines[i]); i++; }
+        const p = document.createElement('p');
+        p.className = 'my-1';
+        renderInlineInto(p, buf.join('\n'));
+        nodes.push(p);
+    }
+    return nodes;
+}
+
+// Replace container content with rendered Markdown. Works with stub DOM
+// (no replaceChildren/removeChild required) and never uses innerHTML.
+function renderMarkdownInto(container, text) {
+    const nodes = renderMarkdown(text);
+    try { container.textContent = ''; } catch {}
+    try {
+        if (typeof container.replaceChildren === 'function') { container.replaceChildren(...nodes); return; }
+    } catch {}
+    try {
+        while (container.firstChild) {
+            try { container.removeChild(container.firstChild); } catch { break; }
+        }
+    } catch {}
+    for (const nd of nodes) {
+        try { container.appendChild(nd); } catch {}
+    }
+}
+window.renderMarkdown = renderMarkdown;
+window.renderMarkdownInto = renderMarkdownInto;
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -678,11 +996,21 @@ function renderDiffLine(line) {
     return div;
 }
 
-function renderProposalCard(payload) {
+function renderProposalCard(payload, spaceId) {
     const data = payload && typeof payload === 'object' ? payload : {};
     const proposalId = typeof data.proposalId === 'string' ? data.proposalId : '';
     if (!proposalId) return null;
     if (proposalCards.has(proposalId)) return proposalCards.get(proposalId).root;
+    // Space binding: explicit arg wins, then payload, then the session
+    // mapping, then the visible space. Approval later uses the card's own
+    // sessionId — never the then-active space.
+    let target = (typeof spaceId === 'string' && getSpace(spaceId)) ? spaceId : null;
+    if (!target && typeof data.spaceId === 'string' && getSpace(data.spaceId)) target = data.spaceId;
+    if (!target && typeof data.sessionId === 'string') target = spaceBySession(data.sessionId);
+    if (!target) target = activeSpaceId;
+    const cardSession = (typeof data.sessionId === 'string' && validSessionId(data.sessionId))
+        ? data.sessionId
+        : getSpaceSession(target);
     const changes = Array.isArray(data.changes) ? data.changes : [];
 
     const wrapper = document.createElement('div');
@@ -755,9 +1083,9 @@ function renderProposalCard(payload) {
     btnRow.appendChild(approveBtn);
     card.appendChild(btnRow);
 
-    messagesDiv.appendChild(wrapper);
-    scrollToBottom();
-    proposalCards.set(proposalId, { root: wrapper, statusEl, approveBtn, rejectBtn, state: 'pending' });
+    spaceAppend(target, wrapper);
+    if (target === activeSpaceId) scrollToBottom();
+    proposalCards.set(proposalId, { root: wrapper, statusEl, approveBtn, rejectBtn, state: 'pending', spaceId: target, sessionId: cardSession, payload: data });
     return wrapper;
 }
 
@@ -793,7 +1121,7 @@ async function decideProposal(proposalId, action) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({ sessionId: (typeof currentSessionId === 'string' ? currentSessionId : null) })
+            body: JSON.stringify({ sessionId: entry.sessionId || null })
         });
         if (res.status === 401) {
             try { loginOverlay.classList.remove('hidden'); } catch {}
@@ -825,15 +1153,17 @@ async function decideProposal(proposalId, action) {
     }
 }
 
-async function fetchProposalAndRender(proposalId) {
+async function fetchProposalAndRender(proposalId, spaceId) {
     if (!proposalId || proposalCards.has(proposalId)) return proposalCards.get(proposalId) || null;
+    const target = (typeof spaceId === 'string' && getSpace(spaceId)) ? spaceId : activeSpaceId;
     try {
-        const qs = (typeof currentSessionId === 'string' && currentSessionId) ? `?sessionId=${encodeURIComponent(currentSessionId)}` : '';
+        const sess = getSpaceSession(target);
+        const qs = sess ? `?sessionId=${encodeURIComponent(sess)}` : '';
         const res = await fetch(`/api/change-proposals/${encodeURIComponent(proposalId)}${qs}`, { credentials: 'include' });
         if (!res.ok) return null;
         const data = await res.json().catch(() => null);
         if (!data || data.proposalId !== proposalId) return null;
-        renderProposalCard(data);
+        renderProposalCard(data, target);
         if (data.status && data.status !== 'pending') {
             setProposalState(proposalId, data.status, data.status === 'applied' ? '已套用' : data.status === 'rejected' ? '已拒絕' : `狀態：${data.status}`);
         }
@@ -855,6 +1185,362 @@ function updateProposalCard(obj) {
     }
     return true;
 }
+window.renderProposalCard = renderProposalCard;
+window.decideProposal = decideProposal;
+window.updateProposalCard = updateProposalCard;
+window.fetchProposalAndRender = fetchProposalAndRender;
+window.setProposalState = setProposalState;
+window.proposalCards = proposalCards;
+
+// --- Multi-Agent Spaces ---
+// One global agent execution at most; each Space owns an independent
+// conversation (session), message view, and proposal state. Backend is
+// untouched: routing is done frontend-side via sessionId mapping.
+const DEFAULT_SPACES = [
+    { spaceId: 'general', name: 'General', icon: '🏠', description: '日常對話與綜合任務', builtin: true },
+    { spaceId: 'coding', name: 'Coding', icon: '💻', description: '程式開發與除錯', builtin: true },
+    { spaceId: 'gmail', name: 'Gmail', icon: '📧', description: '郵件處理', builtin: true },
+    { spaceId: 'calendar', name: 'Calendar', icon: '📅', description: '行事曆', builtin: true },
+    { spaceId: 'morning', name: '早報', icon: '📰', description: '晨間摘要', builtin: true },
+    { spaceId: 'evening', name: '晚報', icon: '🌙', description: '晚間摘要', builtin: true }
+];
+function validSessionId(v) {
+    return typeof v === 'string' && (SPACE_UUID_RE.test(v) || SPACE_SESSION_RE.test(v));
+}
+
+function loadCustomSpaces() {
+    try {
+        const raw = localStorage.getItem('todayai_spaces');
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return [];
+        return arr.filter((s) => s && typeof s === 'object'
+            && typeof s.spaceId === 'string' && SPACE_ID_RE.test(s.spaceId)
+            && typeof s.name === 'string' && s.name.trim().length >= 1 && s.name.trim().length <= 40
+            && (s.icon === undefined || (typeof s.icon === 'string' && s.icon.length <= 8))
+            && (s.description === undefined || (typeof s.description === 'string' && s.description.length <= 120)));
+    } catch { return []; }
+}
+
+function saveCustomSpaces(list) {
+    try { localStorage.setItem('todayai_spaces', JSON.stringify(list)); } catch {}
+}
+
+function allSpaces() {
+    return DEFAULT_SPACES.concat(loadCustomSpaces());
+}
+
+function getSpace(spaceId) {
+    if (typeof spaceId !== 'string') return null;
+    return allSpaces().find((s) => s.spaceId === spaceId) || null;
+}
+
+function getSpaceName(spaceId) {
+    const s = getSpace(spaceId);
+    return s ? s.name : String(spaceId == null ? '' : spaceId);
+}
+
+// Per-space sessions, persisted. Legacy single `todayai_session` migrates
+// once into General so existing conversations survive the upgrade.
+function loadSpaceSessions() {
+    let map = {};
+    try {
+        const raw = localStorage.getItem('todayai_space_sessions');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) map = parsed;
+        }
+    } catch {}
+    const clean = {};
+    for (const k of Object.keys(map)) {
+        if (SPACE_ID_RE.test(k) && validSessionId(map[k])) clean[k] = map[k];
+    }
+    try {
+        const legacy = localStorage.getItem('todayai_session');
+        if (legacy && validSessionId(legacy) && !clean.general) {
+            clean.general = legacy;
+            try { localStorage.removeItem('todayai_session'); } catch {}
+        }
+    } catch {}
+    return clean;
+}
+
+function saveSpaceSessions() {
+    try { localStorage.setItem('todayai_space_sessions', JSON.stringify(spaceSessions)); } catch {}
+}
+
+function getSpaceSession(spaceId) {
+    if (spaceSessions[spaceId] && validSessionId(spaceSessions[spaceId])) return spaceSessions[spaceId];
+    let id = null;
+    try { id = crypto.randomUUID(); } catch {}
+    if (!validSessionId(id)) id = 'space-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+    spaceSessions[spaceId] = id;
+    saveSpaceSessions();
+    return id;
+}
+
+function spaceBySession(sessionId) {
+    if (!validSessionId(sessionId)) return null;
+    for (const s of allSpaces()) {
+        if (spaceSessions[s.spaceId] === sessionId) return s.spaceId;
+    }
+    return null;
+}
+
+// SSE identity: explicit event sessionId first, then an existing proposal
+// card, then the running execution. Never activeSpaceId on its own.
+function resolveEventSpace(obj, execution) {
+    try {
+        if (obj && typeof obj.sessionId === 'string') {
+            const bySession = spaceBySession(obj.sessionId);
+            if (bySession) return bySession;
+        }
+        if (obj && obj.proposalId && proposalCards.has(obj.proposalId)) {
+            const sp = proposalCards.get(obj.proposalId).spaceId;
+            if (sp) return sp;
+        }
+    } catch {}
+    if (execution && execution.spaceId) return execution.spaceId;
+    return activeSpaceId;
+}
+
+function loadActiveSpaceId() {
+    try {
+        const v = localStorage.getItem('todayai_active_space');
+        if (v && getSpace(v)) return v;
+    } catch {}
+    return 'general';
+}
+
+function setActiveSpaceId(id) {
+    activeSpaceId = id;
+    try { localStorage.setItem('todayai_active_space', id); } catch {}
+}
+
+function getActiveSpace() {
+    return getSpace(activeSpaceId) || getSpace('general');
+}
+
+// Per-space detached DOM stash. Switching moves live nodes (listeners and
+// proposal card refs survive the move); background streams keep mutating
+// their detached nodes and become visible on switch-back.
+const spaceViews = {}; // spaceId -> { nodes: [], historyLoaded: false }
+function spaceView(spaceId) {
+    if (!spaceViews[spaceId]) spaceViews[spaceId] = { nodes: [], historyLoaded: false };
+    return spaceViews[spaceId];
+}
+
+function clearContainer(el) {
+    if (!el) return;
+    try {
+        if (typeof el.replaceChildren === 'function') { el.replaceChildren(); return; }
+    } catch {}
+    try {
+        while (el.firstChild) {
+            try { el.removeChild(el.firstChild); } catch { break; }
+        }
+    } catch {}
+}
+
+function spaceAppend(spaceId, node) {
+    if (!node) return null;
+    if (spaceId === activeSpaceId) {
+        try { messagesDiv.appendChild(node); } catch { return null; }
+    } else {
+        spaceView(spaceId).nodes.push(node);
+    }
+    try { scrollToBottom(); } catch {}
+    return node;
+}
+
+// Global single-flight execution. activeSpaceId is only "what the user
+// looks at"; activeExecution is "what is running". They are independent.
+let activeExecution = null; // { executionId, spaceId, sessionId, controller, status }
+
+function refreshSpaces() {
+    renderSpaceList();
+    updateActiveSpaceHeader();
+}
+
+function renderSpaceList() {
+    let listEl = null;
+    try { listEl = document.getElementById('space-list'); } catch {}
+    if (!listEl) return;
+    clearContainer(listEl);
+    for (const s of allSpaces()) {
+        const row = document.createElement('div');
+        const isActive = s.spaceId === activeSpaceId;
+        const isRunning = !!activeExecution && activeExecution.spaceId === s.spaceId;
+        row.className = `flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition min-h-[44px] ${isActive ? 'bg-slate-800 text-indigo-300 border border-slate-700' : 'hover:bg-slate-800/60 text-slate-400 hover:text-slate-200'}`;
+        row.dataset.spaceId = s.spaceId;
+        const icon = document.createElement('span');
+        icon.className = 'text-base leading-none shrink-0';
+        icon.textContent = (typeof s.icon === 'string' && s.icon) ? s.icon : '🤖';
+        const nameWrap = document.createElement('div');
+        nameWrap.className = 'flex-1 min-w-0 text-left';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'text-xs font-medium truncate';
+        nameEl.textContent = s.name;
+        nameWrap.appendChild(nameEl);
+        if (s.description) {
+            const desc = document.createElement('div');
+            desc.className = 'text-[10px] opacity-60 truncate';
+            desc.textContent = s.description;
+            nameWrap.appendChild(desc);
+        }
+        row.appendChild(icon);
+        row.appendChild(nameWrap);
+        if (isRunning) {
+            const dot = document.createElement('span');
+            dot.className = 'text-[10px] text-emerald-300 shrink-0 flex items-center gap-1';
+            dot.textContent = '● Running';
+            row.appendChild(dot);
+        }
+        row.addEventListener('click', () => switchSpace(s.spaceId));
+        try { listEl.appendChild(row); } catch {}
+    }
+    try { if (window.lucide) lucide.createIcons(); } catch {}
+}
+
+function updateActiveSpaceHeader() {
+    const space = getActiveSpace();
+    try {
+        const iconEl = document.getElementById('active-space-icon');
+        if (iconEl) iconEl.textContent = (space && space.icon) || '🏠';
+        const nameEl = document.getElementById('active-space-name');
+        if (nameEl) nameEl.textContent = (space && space.name) || 'General';
+    } catch {}
+}
+
+function closeDrawer() {
+    try {
+        const sb = document.getElementById('sidebar');
+        const ov = document.getElementById('sidebar-overlay');
+        if (!sb || !ov) return;
+        sb.classList.add('-translate-x-full');
+        ov.classList.add('hidden');
+    } catch {}
+}
+
+function switchSpace(spaceId) {
+    const space = getSpace(spaceId);
+    if (!space) return false;
+    if (spaceId === activeSpaceId) {
+        try { closeDrawer(); } catch {}
+        return true;
+    }
+    // Stash live nodes of the outgoing space.
+    try {
+        const current = [];
+        try {
+            const kids = messagesDiv.childNodes;
+            for (let i = 0; i < kids.length; i++) current.push(kids[i]);
+        } catch {}
+        spaceView(activeSpaceId).nodes = current;
+    } catch {}
+    clearContainer(messagesDiv);
+    setActiveSpaceId(spaceId);
+    const view = spaceView(spaceId);
+    for (const nd of view.nodes) {
+        try { messagesDiv.appendChild(nd); } catch {}
+    }
+    view.nodes = [];
+    updateActiveSpaceHeader();
+    renderSpaceList();
+    if (view.nodes.length === 0 && !view.historyLoaded) {
+        loadHistoryForSpace(spaceId);
+    } else {
+        updateWelcomeVisibility();
+    }
+    try { closeDrawer(); } catch {}
+    try { scrollToBottom(); } catch {}
+    return true;
+}
+
+function updateWelcomeVisibility() {
+    try {
+        const hasNodes = messagesDiv.childNodes && messagesDiv.childNodes.length > 0;
+        if (hasNodes) welcomeSection.classList.add('hidden');
+        else welcomeSection.classList.remove('hidden');
+    } catch {}
+}
+
+async function loadHistoryForSpace(spaceId) {
+    const view = spaceView(spaceId);
+    const sessionId = getSpaceSession(spaceId);
+    try {
+        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(sessionId)}&limit=100`, { credentials: 'include' });
+        if (res.status === 401) { try { loginOverlay.classList.remove('hidden'); } catch {} return; }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const rows = await res.json();
+        view.historyLoaded = true;
+        if (Array.isArray(rows) && rows.length > 0) {
+            for (const r of rows) appendMessage(r.role === 'user' ? 'user' : 'ai', r.content, spaceId);
+            if (spaceId === activeSpaceId) updateWelcomeVisibility();
+        } else if (spaceId === activeSpaceId) {
+            updateWelcomeVisibility();
+        }
+    } catch (e) { try { console.warn('history load failed', e); } catch {} }
+}
+
+function toggleNewAgentForm() {
+    try {
+        const f = document.getElementById('new-agent-form');
+        if (f) f.classList.toggle('hidden');
+    } catch {}
+}
+
+function createAgentSpace() {
+    let name = '';
+    let icon = '';
+    let desc = '';
+    try {
+        name = (document.getElementById('new-agent-name').value || '').trim();
+        icon = (document.getElementById('new-agent-icon').value || '').trim();
+        desc = (document.getElementById('new-agent-desc').value || '').trim();
+    } catch {}
+    if (!name || name.length > 40) {
+        try { appendSystemMessage(activeSpaceId, '名稱不可為空（最多 40 字）。'); } catch {}
+        return false;
+    }
+    if (icon && icon.length > 8) icon = icon.slice(0, 8);
+    if (desc.length > 120) desc = desc.slice(0, 120);
+    let spaceId = 'custom-' + Date.now().toString(36);
+    if (!SPACE_ID_RE.test(spaceId) || getSpace(spaceId)) {
+        spaceId = 'custom-' + Math.floor(Math.random() * 1e9).toString(36);
+    }
+    const list = loadCustomSpaces();
+    list.push({ spaceId, name, icon: icon || '🤖', description: desc, createdAt: new Date().toISOString() });
+    saveCustomSpaces(list);
+    getSpaceSession(spaceId);
+    try {
+        document.getElementById('new-agent-name').value = '';
+        document.getElementById('new-agent-icon').value = '';
+        document.getElementById('new-agent-desc').value = '';
+        document.getElementById('new-agent-form').classList.add('hidden');
+    } catch {}
+    switchSpace(spaceId);
+    return true;
+}
+
+function appendSystemMessage(spaceId, text) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex justify-center min-w-0';
+    const div = document.createElement('div');
+    div.className = 'text-xs text-slate-500 px-3 py-1.5 max-w-[min(36rem,85vw)] text-center break-words';
+    div.style.overflowWrap = 'anywhere';
+    div.textContent = text;
+    wrapper.appendChild(div);
+    return spaceAppend(spaceId, wrapper);
+}
+
+window.switchSpace = switchSpace;
+window.createAgentSpace = createAgentSpace;
+window.toggleNewAgentForm = toggleNewAgentForm;
+window.getActiveSpace = getActiveSpace;
+window.allSpaces = allSpaces;
+window.getSpaceSession = getSpaceSession;
+window.getActiveExecution = function () { return activeExecution; };
 window.renderProposalCard = renderProposalCard;
 window.decideProposal = decideProposal;
 window.updateProposalCard = updateProposalCard;
