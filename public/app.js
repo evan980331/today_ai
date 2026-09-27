@@ -694,7 +694,13 @@ function renderProposalCard(payload) {
 
     const title = document.createElement('div');
     title.className = 'font-semibold text-slate-100 mb-1';
-    title.textContent = `需要批准修改（${changes.length} 個檔案）`;
+    // P3-8: correction proposals reuse the same card; only the title
+    // distinguishes the attempt number. correctionAttempt arrives via the
+    // approval_required / proposal_created event, never from user input.
+    const attempt = Number.isInteger(data.correctionAttempt) && data.correctionAttempt > 0 ? data.correctionAttempt : null;
+    title.textContent = attempt === null
+        ? `需要批准修改（${changes.length} 個檔案）`
+        : `需要批准修改（修正 #${attempt}，${changes.length} 個檔案）`;
     card.appendChild(title);
 
     const idLine = document.createElement('div');

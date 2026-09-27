@@ -393,3 +393,30 @@ describe('P3-7 stream + safety behaviors', () => {
         assert.equal(countNotes(), before);
     });
 });
+
+describe('P3-8 correction card distinction', () => {
+    it('23 correction proposal shows the attempt number', () => {
+        const { win, doc } = boot(okFetch);
+        const payload = JSON.parse(JSON.stringify(PROPOSAL));
+        payload.correctionAttempt = 2;
+        payload.isCorrection = true;
+        win.renderProposalCard(payload);
+        const card = findCard(doc, 'prop_abc123');
+        assert.ok(card.textContent.includes('修正 #2'));
+    });
+    it('24 ordinary proposals keep the plain title', () => {
+        const { win, doc } = boot(okFetch);
+        win.renderProposalCard(JSON.parse(JSON.stringify(PROPOSAL)));
+        const card = findCard(doc, 'prop_abc123');
+        assert.ok(card.textContent.includes('需要批准修改'));
+        assert.ok(!card.textContent.includes('修正 #'));
+    });
+    it('25 correction flags never execute as HTML', () => {
+        const { win, doc } = boot(okFetch);
+        const payload = JSON.parse(JSON.stringify(PROPOSAL));
+        payload.correctionAttempt = '<img src=x onerror=alert(1)>';
+        win.renderProposalCard(payload);
+        assert.ok(!allInnerHTML(doc).includes('onerror=alert'));
+        assert.ok(findCard(doc, 'prop_abc123').textContent.includes('需要批准修改'));
+    });
+});

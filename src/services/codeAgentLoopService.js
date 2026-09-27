@@ -4,6 +4,15 @@
 // continues (change_apply + verify) on a later run that carries the
 // already-created proposalId plus a human approval. The loop never
 // approves its own proposal.
+// P3-8: bounded self-correction. On the resume path, a failing verify test
+// diagnoses (structured test result + fresh context via existing tools),
+// proposes ONE correction (server-supplied `corrections` queue, never
+// model-generated), and pauses for human approval again. Runs are
+// stateless: cross-run attempt accounting travels in `correctionOffset`
+// (taken from the previous run's own output, never from the model), and
+// MAX_CORRECTION_ATTEMPTS is enforced server-side. Per-run step/test/
+// context budgets are shared across apply/verify/diagnose/propose —
+// corrections never reset them.
 //
 // Every step still executes through the existing Agent Core (P2-I
 // multi-step loop) via ToolRegistry.execute() with the existing permission
@@ -31,6 +40,7 @@ const proposalService = require('./changeProposalService');
 const MAX_AGENT_STEPS = 12;
 const MAX_TEST_RUNS = 3;
 const MAX_CONTEXT_CALLS = 4;
+const MAX_CORRECTION_ATTEMPTS = 3;
 const MAX_GOAL_CHARS = 2000;
 const MAX_EDITS = 10;
 const MAX_CHECKS = 5;
@@ -101,6 +111,28 @@ function checkGoal(goal) {
     return text;
 }
 
+function checkEdit(e, i, label) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `${label}[${i}] must be an object`);
+    }
+    if (typeof e.path !== 'string' || !e.path.trim()) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `${label}[${i}].path must be a non-empty string`);
+    }
+    // Loop-level path hygiene (the proposal service re-validates fully):
+    // workspace-relative, no traversal, no absolute/UNC shapes.
+    const rel = e.path.trim().replace(/\\/g, '/');
+    if (rel === '.' || rel === './' || rel.startsWith('-') || rel === '--') {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `${label}[${i}].path is not a valid file path`);
+    }
+    if (rel.includes('\0') || /(^|\/)\.\.(\/|$)/.test(rel) || /^[a-zA-Z]:/.test(rel) || rel.startsWith('//')) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `${label}[${i}].path must be a workspace-relative path`);
+    }
+    if (typeof e.content !== 'string' && e.content !== null) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `${label}[${i}].content must be a string or null (null deletes)`);
+    }
+    return { path: e.path, content: e.content === undefined ? null : e.content };
+}
+
 function checkEdits(edits) {
     if (edits === undefined || edits === null) return [];
     if (!Array.isArray(edits)) {
@@ -109,18 +141,37 @@ function checkEdits(edits) {
     if (edits.length > MAX_EDITS) {
         throw loopError(400, 'TOOL_INVALID_INPUT', `edits must contain at most ${MAX_EDITS} entries`);
     }
-    return edits.map((e, i) => {
-        if (!e || typeof e !== 'object' || Array.isArray(e)) {
-            throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}] must be an object`);
+    return edits.map((e, i) => checkEdit(e, i, 'edits'));
+}
+
+// P3-8 correction queue: server-supplied rounds of edits, one proposal per
+// round. Never model-generated; each round still becomes its own proposal
+// with its own proposalId through the existing approval flow.
+function checkCorrections(corrections, maxCorrections) {
+    if (corrections === undefined || corrections === null) return [];
+    if (!Array.isArray(corrections)) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', 'corrections must be an array');
+    }
+    if (corrections.length > maxCorrections) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', `corrections must contain at most ${maxCorrections} rounds`);
+    }
+    return corrections.map((round, r) => {
+        if (!Array.isArray(round) || round.length === 0) {
+            throw loopError(400, 'TOOL_INVALID_INPUT', `corrections[${r}] must be a non-empty array of edits`);
         }
-        if (typeof e.path !== 'string' || !e.path.trim()) {
-            throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}].path must be a non-empty string`);
+        if (round.length > MAX_EDITS) {
+            throw loopError(400, 'TOOL_INVALID_INPUT', `corrections[${r}] must contain at most ${MAX_EDITS} edits`);
         }
-        if (typeof e.content !== 'string' && e.content !== null) {
-            throw loopError(400, 'TOOL_INVALID_INPUT', `edits[${i}].content must be a string or null (null deletes)`);
-        }
-        return { path: e.path, content: e.content === undefined ? null : e.content };
+        return round.map((e, i) => checkEdit(e, i, `corrections[${r}]`));
     });
+}
+
+function checkCorrectionOffset(offset) {
+    if (offset === undefined || offset === null) return 0;
+    if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', 'correctionOffset must be a non-negative integer');
+    }
+    return offset;
 }
 
 function checkChecks(checks) {
@@ -234,7 +285,7 @@ function testSummaryFrom(record) {
     };
 }
 
-async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, proposalId = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
+async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, proposalId = null, corrections = null, correctionOffset = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
     checkAborted(signal);
     const who = checkOwner(owner);
     const text = checkGoal(goal);
@@ -254,6 +305,9 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     const maxSteps = limits.MAX_AGENT_STEPS || MAX_AGENT_STEPS;
     const maxTests = limits.MAX_TEST_RUNS || MAX_TEST_RUNS;
     const maxContexts = limits.MAX_CONTEXT_CALLS || MAX_CONTEXT_CALLS;
+    const maxCorrections = limits.MAX_CORRECTION_ATTEMPTS || MAX_CORRECTION_ATTEMPTS;
+    const validCorrections = checkCorrections(corrections === undefined ? [] : corrections, maxCorrections);
+    const offset = checkCorrectionOffset(correctionOffset === undefined ? null : correctionOffset);
     // Owner-scoped workspace resolution up front: unknown or foreign
     // workspaces fail before any tool runs.
     const wsSvc = (deps && deps.workspaceService) || WorkspaceService.default();
@@ -271,6 +325,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
             goal: text, plan: [], steps: [], toolsUsed: [], tests: [],
             proposalId: proposalId || null, proposalStatus: null,
+            correctionAttempts: offset, corrections: [], diagnosis: null,
             finalStatus: 'failed', failureReason: (e && e.message) || 'workspace resolution failed',
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
@@ -301,6 +356,11 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     const records = [];
     const toolsUsed = [];
     const tests = [];
+    // P3-8 correction state (this run only; cross-run accounting travels
+    // in `offset`, taken from the previous run's own output).
+    const correctionsLog = [];
+    let diagnosis = null;
+    let pendingCorrection = null;
     let contextCalls = 0;
     let testRuns = 0;
     let createdProposalId = resumeId;
@@ -362,15 +422,36 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
 
         // A freshly proposed change pauses the loop: the agent must not
         // approve its own proposal. The caller resumes later with the
-        // proposalId plus a human approval.
+        // proposalId plus a human approval. Correction pauses additionally
+        // record the attempt, diagnosis, and new proposalId; the previous
+        // proposal is never mutated.
         if (step.tool === 'change_propose') {
             const data = rec.result && typeof rec.result === 'object' ? rec.result : {};
             const inner = data.result && typeof data.result === 'object' ? data.result : data;
             createdProposalId = typeof inner.proposalId === 'string' ? inner.proposalId : null;
             createdProposalStatus = typeof inner.status === 'string' ? inner.status : 'pending';
             const files = Array.isArray(inner.changes) ? inner.changes.map((c) => c.path) : [];
-            emit(onEvent, { type: 'proposal_created', proposalId: createdProposalId, files });
-            emit(onEvent, { type: 'approval_required', proposalId: createdProposalId, status: createdProposalStatus });
+            if (pendingCorrection) {
+                const entry = {
+                    attempt: pendingCorrection.attempt,
+                    proposalId: createdProposalId,
+                    testResult: pendingCorrection.testResult,
+                    status: createdProposalStatus
+                };
+                correctionsLog.push(entry);
+                diagnosis = {
+                    attempt: pendingCorrection.attempt,
+                    testCode: pendingCorrection.testResult.code,
+                    testExitCode: pendingCorrection.testResult.exitCode,
+                    inspected: ['code_context', 'git_status']
+                };
+                emit(onEvent, { type: 'proposal_created', proposalId: createdProposalId, files, correctionAttempt: entry.attempt, isCorrection: true });
+                emit(onEvent, { type: 'approval_required', proposalId: createdProposalId, status: createdProposalStatus, correctionAttempt: entry.attempt, isCorrection: true });
+                pendingCorrection = null;
+            } else {
+                emit(onEvent, { type: 'proposal_created', proposalId: createdProposalId, files });
+                emit(onEvent, { type: 'approval_required', proposalId: createdProposalId, status: createdProposalStatus });
+            }
             return finish({
                 ok: false, code: 'APPROVAL_REQUIRED',
                 finalStatus: 'awaiting_approval',
@@ -382,16 +463,37 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             emit(onEvent, { type: 'changes_applied', proposalId: createdProposalId });
             createdProposalStatus = 'applied';
         }
-        // Bounded re-inspect on the resume path: a failing post-apply
-        // test re-queues one inspect + one test round while budgets last.
+        // P3-8 self-correction on the resume path: a failing post-apply
+        // test either (a) diagnoses + proposes the next server-supplied
+        // correction round and pauses for human approval, (b) terminates
+        // with AGENT_CORRECTION_LIMIT when attempts are exhausted, or
+        // (c) falls back to the legacy bounded re-inspect when no
+        // corrections were supplied. All diagnose/propose steps share the
+        // same per-run budgets — nothing resets.
         const isVerify = step.tool === 'test_runner' && resumeId && queue.length === 0;
         const lastTest = tests.length ? tests[tests.length - 1] : null;
-        if (isVerify && lastTest && !lastTest.ok && testRuns <= maxTests && records.length + 2 <= maxSteps) {
-            queue.push(
-                { type: 'inspect', tool: 'code_context', input: { workspaceId, sessionId } },
-                { type: 'test', tool: 'test_runner', input: { workspaceId, sessionId } }
-            );
-            continue;
+        if (isVerify && lastTest && !lastTest.ok) {
+            const used = correctionsLog.length;
+            const attempt = offset + used + 1;
+            if (validCorrections.length > used) {
+                if (attempt > maxCorrections) {
+                    return finish({ ok: false, code: 'AGENT_CORRECTION_LIMIT', finalStatus: 'correction_limit', failureReason: `correction limit reached (${maxCorrections})` });
+                }
+                pendingCorrection = { attempt, testResult: { ok: lastTest.ok, code: lastTest.code, exitCode: lastTest.exitCode } };
+                queue.push(
+                    { type: 'inspect', tool: 'code_context', input: { workspaceId, sessionId } },
+                    { type: 'status', tool: 'git_status', input: { workspaceId, sessionId } },
+                    { type: 'propose', tool: 'change_propose', input: { workspaceId, sessionId, changes: validCorrections[used] } }
+                );
+                continue;
+            }
+            if (testRuns <= maxTests && records.length + 2 <= maxSteps) {
+                queue.push(
+                    { type: 'inspect', tool: 'code_context', input: { workspaceId, sessionId } },
+                    { type: 'test', tool: 'test_runner', input: { workspaceId, sessionId } }
+                );
+                continue;
+            }
         }
     }
 
@@ -408,7 +510,8 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
             goal: text, plan: planSummary(), steps: stepsDone, toolsUsed: toolsDone, tests: [],
             proposalId: resumeId, proposalStatus,
-            finalStatus: 'failed', failureReason, errorCode,
+            correctionAttempts: offset, corrections: [], diagnosis: null,
+            finalStatus: proposalStatus === 'rejected' ? 'rejected' : 'failed', failureReason, errorCode,
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
     }
@@ -435,6 +538,9 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             tests,
             proposalId,
             proposalStatus,
+            correctionAttempts: offset + correctionsLog.length,
+            corrections: correctionsLog.map((c) => ({ ...c })),
+            diagnosis,
             finalStatus,
             failureReason,
             errorCode,
@@ -452,6 +558,7 @@ module.exports = {
     MAX_AGENT_STEPS,
     MAX_TEST_RUNS,
     MAX_CONTEXT_CALLS,
+    MAX_CORRECTION_ATTEMPTS,
     MAX_GOAL_CHARS,
     MAX_EDITS,
     AUTO_TOOLS,
