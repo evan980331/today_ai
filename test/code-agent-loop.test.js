@@ -335,8 +335,11 @@ describe('P3-6 results + events (stub core)', () => {
         assert.equal(types[0], 'message.started');
         assert.equal(types[types.length - 1], 'message.completed');
         assert.ok(types.includes('tool.started') && types.includes('tool.completed'));
-        assert.ok(events.every((e) => ['message.started', 'tool.started', 'tool.completed', 'message.completed', 'error'].includes(e.type)));
+        // P3-9 checkpoint lifecycle events ride the same stream.
+        assert.ok(types.includes('checkpoint_created') && types.includes('checkpoint_completed'));
+        assert.ok(events.every((e) => ['message.started', 'tool.started', 'tool.completed', 'message.completed', 'error', 'checkpoint_created', 'checkpoint_paused', 'checkpoint_resumed', 'checkpoint_waiting_approval', 'checkpoint_completed', 'checkpoint_failed', 'checkpoint_cancelled', 'proposal_created', 'approval_required', 'changes_applied', 'proposal_stale'].includes(e.type)));
         assert.equal(out.ok, true);
+        assert.ok(typeof out.checkpointId === 'string');
     });
     it('29 error event on tool failure', async () => {
         const core = stubCore({ git_status: { error: Object.assign(new Error('nope'), { status: 500 }) } });

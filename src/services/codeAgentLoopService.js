@@ -36,6 +36,7 @@ const crypto = require('crypto');
 const defaultCore = require('../agent/core');
 const { WorkspaceService } = require('./workspaceService');
 const proposalService = require('./changeProposalService');
+const { AgentCheckpointService } = require('./agentCheckpointService');
 
 const MAX_AGENT_STEPS = 12;
 const MAX_TEST_RUNS = 3;
@@ -285,7 +286,7 @@ function testSummaryFrom(record) {
     };
 }
 
-async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, proposalId = null, corrections = null, correctionOffset = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
+async function run({ workspaceId = null, sessionId = null, owner = null, goal = null, edits = null, checks = null, proposalId = null, corrections = null, correctionOffset = null, checkpointId = null, expectedVersion = null, signal = null, approval = null, timeoutMs = null, onEvent = null, deps = null } = {}) {
     checkAborted(signal);
     const who = checkOwner(owner);
     const text = checkGoal(goal);
@@ -300,6 +301,12 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     if (proposalId !== undefined && proposalId !== null && (typeof proposalId !== 'string' || !proposalId)) {
         throw loopError(400, 'TOOL_INVALID_INPUT', 'proposalId must be a non-empty string');
     }
+    if (checkpointId !== undefined && checkpointId !== null && (typeof checkpointId !== 'string' || !checkpointId)) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', 'checkpointId must be a non-empty string');
+    }
+    if (expectedVersion !== undefined && expectedVersion !== null && (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1)) {
+        throw loopError(400, 'TOOL_INVALID_INPUT', 'expectedVersion must be a positive integer');
+    }
     const core = (deps && deps.core) || defaultCore;
     const limits = (deps && deps.limits) || {};
     const maxSteps = limits.MAX_AGENT_STEPS || MAX_AGENT_STEPS;
@@ -307,7 +314,9 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     const maxContexts = limits.MAX_CONTEXT_CALLS || MAX_CONTEXT_CALLS;
     const maxCorrections = limits.MAX_CORRECTION_ATTEMPTS || MAX_CORRECTION_ATTEMPTS;
     const validCorrections = checkCorrections(corrections === undefined ? [] : corrections, maxCorrections);
-    const offset = checkCorrectionOffset(correctionOffset === undefined ? null : correctionOffset);
+    // NOTE: `offset` (effective correction base) is assigned in the init
+    // block below: fresh runs use the caller-supplied correctionOffset,
+    // checkpoint resumes use the stored correctionBase.
     // Owner-scoped workspace resolution up front: unknown or foreign
     // workspaces fail before any tool runs.
     const wsSvc = (deps && deps.workspaceService) || WorkspaceService.default();
@@ -325,34 +334,57 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
             goal: text, plan: [], steps: [], toolsUsed: [], tests: [],
             proposalId: proposalId || null, proposalStatus: null,
-            correctionAttempts: offset, corrections: [], diagnosis: null,
+            correctionAttempts: 0, corrections: [], diagnosis: null,
+            checkpointId: null, checkpointVersion: null,
             finalStatus: 'failed', failureReason: (e && e.message) || 'workspace resolution failed',
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
     }
-    // Resume path: an already-created proposal is applied (human approval
-    // enforced by the registry gate on change_apply) and verified. The
-    // proposal itself is re-validated owner/session-side before use.
-    const resumeId = proposalId === undefined ? null : proposalId;
-    if (resumeId) {
-        try {
-            const current = await (async () => {
-                checkAborted(signal);
-                const svc = (deps && deps.proposals) || proposalService;
-                return svc.get({ proposalId: resumeId, owner: who, sessionId: sessionId === undefined ? null : sessionId, signal: signal || null });
-            })();
-            if (current.status !== 'pending') {
-                return finishResume([], [], `proposal is ${current.status}`, current.status, 'PROPOSAL_NOT_PENDING');
-            }
-        } catch (e) {
-            if (isAbortError(e)) throw e;
-            const msg = (e && e.message) || 'proposal lookup failed';
-            const code = e && typeof e.code === 'string' ? e.code : null;
-            return finishResume([], [], msg, null, code);
-        }
+    const cpSvc = (deps && deps.checkpoints) || AgentCheckpointService.default();
+    let sessForCp = sessionId === undefined ? null : sessionId;
+    let cpId = null;
+    let cpVersion = 0;
+
+    // Serialize the mutable execution context for the checkpoint store.
+    // Everything here is JSON-safe tool data — never signals, handles,
+    // env, or secrets.
+    function snapshot(extra = {}) {
+        return {
+            goal: text,
+            workspaceId, sessionId,
+            queue: queue.map((s) => ({ type: s.type, tool: s.tool, input: s.input })),
+            counts: { steps: records.length, tests: testRuns, contexts: contextCalls },
+            toolsUsed: toolsUsed.slice(),
+            tests: tests.map((t) => ({ ...t })),
+            correctionsLog: correctionsLog.map((c) => ({ ...c })),
+            diagnosis: diagnosis ? { ...diagnosis } : null,
+            createdProposalId, createdProposalStatus,
+            correctionBase: offset + (correctionsLog.length - logBase),
+            correctionsRemaining: correctionsRemaining.map((round) => round.map((e) => ({ ...e }))),
+            pendingCorrection: pendingCorrection ? { ...pendingCorrection } : null,
+            resumeProposalId: resumeId,
+            ...extra
+        };
     }
-    const plan = buildPlan({ goal: text, workspaceId, sessionId, edits: validEdits, checks: validChecks, proposalId: resumeId });
-    const queue = plan.slice();
+
+    async function saveCp(status, extra = {}) {
+        const rec = await cpSvc.update(cpId, who, { status, state: snapshot(extra), expectedVersion: cpVersion, sessionId: sessForCp });
+        cpVersion = rec.version;
+        emit(onEvent, { type: checkpointEventFor(status), checkpointId: cpId, version: cpVersion });
+        return rec;
+    }
+
+    function checkpointEventFor(status) {
+        if (status === 'waiting_approval') return 'checkpoint_waiting_approval';
+        if (status === 'completed') return 'checkpoint_completed';
+        if (status === 'failed') return 'checkpoint_failed';
+        if (status === 'cancelled') return 'checkpoint_cancelled';
+        return 'checkpoint_paused';
+    }
+    // Execution context: fresh runs build it from the plan; checkpoint
+    // resumes restore it (budgets continue, never reset).
+    let queue = [];
+    let plan = [];
     const records = [];
     const toolsUsed = [];
     const tests = [];
@@ -361,24 +393,148 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     const correctionsLog = [];
     let diagnosis = null;
     let pendingCorrection = null;
+    // P3-9: index in correctionsLog where this run's own entries start
+    // (entries before it were restored from the checkpoint).
+    let logBase = 0;
     let contextCalls = 0;
     let testRuns = 0;
-    let createdProposalId = resumeId;
-    let createdProposalStatus = resumeId ? 'pending' : null;
+    let createdProposalId = null;
+    let createdProposalStatus = null;
+    let resumeId = proposalId === undefined ? null : proposalId;
+    let correctionsRemaining = [];
+    let offset = checkCorrectionOffset(correctionOffset === undefined ? null : correctionOffset);
 
     emit(onEvent, { type: 'message.started', sessionId });
 
+    // P3-9 resume: claim the checkpoint (CAS: exactly one resume wins),
+    // then rebuild. Waiting_approval checkpoints rebuild the apply+verify
+    // plan for the stored proposal; interrupted runs continue their
+    // stored queue. Stored correction state always wins over a
+    // caller-supplied correctionOffset.
+    if (checkpointId !== undefined && checkpointId !== null) {
+        let claimed;
+        try {
+            checkAborted(signal);
+            claimed = await cpSvc.claimForResume(checkpointId, who, { sessionId: sessForCp, expectedVersion: expectedVersion === undefined ? null : expectedVersion });
+        } catch (e) {
+            if (isAbortError(e)) throw e;
+            const msg = (e && e.message) || 'checkpoint resume failed';
+            const code = e && typeof e.code === 'string' ? e.code : null;
+            return await finishResume([], [], msg, null, code);
+        }
+        cpId = claimed.checkpointId;
+        cpVersion = claimed.version;
+        // The stored session is authoritative for all later checkpoint
+        // writes in this run (a caller-supplied session already passed
+        // the mismatch check above when both were present).
+        sessForCp = claimed.sessionId === undefined ? null : claimed.sessionId;
+        const st = claimed.state && typeof claimed.state === 'object' ? claimed.state : {};
+        if ((workspaceId !== undefined && workspaceId !== null && st.workspaceId !== undefined && st.workspaceId !== null && workspaceId !== st.workspaceId) ||
+            (sessionId !== undefined && sessionId !== null && st.sessionId !== undefined && st.sessionId !== null && sessionId !== st.sessionId)) {
+            return await finishResume([], [], 'checkpoint workspace/session mismatch', null, 'CHECKPOINT_INVALID');
+        }
+        emit(onEvent, { type: 'checkpoint_resumed', checkpointId: cpId, version: cpVersion });
+        const wasWaiting = Array.isArray(st.queue) && st.queue.length === 0 && typeof st.pendingProposalId === 'string' && st.pendingProposalId;
+        const counts = st.counts && typeof st.counts === 'object' ? st.counts : {};
+        contextCalls = Number.isInteger(counts.contexts) && counts.contexts >= 0 ? counts.contexts : 0;
+        testRuns = Number.isInteger(counts.tests) && counts.tests >= 0 ? counts.tests : 0;
+        if (Array.isArray(st.toolsUsed)) for (const t of st.toolsUsed) if (typeof t === 'string' && !toolsUsed.includes(t)) toolsUsed.push(t);
+        if (Array.isArray(st.tests)) for (const t of st.tests) tests.push({ ...t });
+        if (Array.isArray(st.correctionsLog)) for (const c of st.correctionsLog) correctionsLog.push({ ...c });
+        logBase = correctionsLog.length;
+        diagnosis = st.diagnosis && typeof st.diagnosis === 'object' ? { ...st.diagnosis } : null;
+        createdProposalId = typeof st.createdProposalId === 'string' ? st.createdProposalId : null;
+        createdProposalStatus = typeof st.createdProposalStatus === 'string' ? st.createdProposalStatus : null;
+        offset = Number.isInteger(st.correctionBase) && st.correctionBase >= 0 ? st.correctionBase : offset;
+        correctionsRemaining = Array.isArray(st.correctionsRemaining) ? st.correctionsRemaining : [];
+        // P3-9: rounds the caller supplies on resume are appended after
+        // the stored unused rounds (attempt numbering still comes from
+        // the stored base, never from caller input).
+        if (validCorrections.length > 0) {
+            const combined = correctionsRemaining.concat(validCorrections.map((round) => round.map((e) => ({ ...e }))));
+            if (combined.length > maxCorrections) {
+                return await finishResume([], [], `corrections exceed limit (${maxCorrections})`, null, 'TOOL_INVALID_INPUT');
+            }
+            correctionsRemaining = combined;
+        }
+        pendingCorrection = st.pendingCorrection && typeof st.pendingCorrection === 'object' ? { ...st.pendingCorrection } : null;
+        if (wasWaiting) {
+            if (resumeId && resumeId !== st.pendingProposalId) {
+                return await finishResume([], [], 'proposalId does not match checkpoint proposal', st.pendingProposalId, 'CHECKPOINT_INVALID');
+            }
+            resumeId = st.pendingProposalId;
+            plan = buildPlan({ goal: st.goal || text, workspaceId, sessionId, edits: [], checks: [], proposalId: resumeId });
+            queue = plan.slice();
+        } else {
+            if (!Array.isArray(st.queue)) {
+                return await finishResume([], [], 'checkpoint has no resumable queue', null, 'CHECKPOINT_INVALID');
+            }
+            resumeId = typeof st.resumeProposalId === 'string' ? st.resumeProposalId : null;
+            if (resumeId && proposalId !== undefined && proposalId !== null && proposalId !== resumeId) {
+                return await finishResume([], [], 'proposalId does not match checkpoint proposal', resumeId, 'CHECKPOINT_INVALID');
+            }
+            plan = validateSteps(st.queue);
+            queue = plan.slice();
+        }
+    } else {
+        // Resume path: an already-created proposal is applied (human approval
+        // enforced by the registry gate on change_apply) and verified. The
+        // proposal itself is re-validated owner/session-side before use.
+        resumeId = proposalId === undefined ? null : proposalId;
+        if (resumeId) {
+            try {
+                const current = await (async () => {
+                    checkAborted(signal);
+                    const svc = (deps && deps.proposals) || proposalService;
+                    return svc.get({ proposalId: resumeId, owner: who, sessionId: sessionId === undefined ? null : sessionId, signal: signal || null });
+                })();
+                if (current.status !== 'pending') {
+                    return await finishResume([], [], `proposal is ${current.status}`, current.status, 'PROPOSAL_NOT_PENDING');
+                }
+            } catch (e) {
+                if (isAbortError(e)) throw e;
+                const msg = (e && e.message) || 'proposal lookup failed';
+                const code = e && typeof e.code === 'string' ? e.code : null;
+                return await finishResume([], [], msg, null, code);
+            }
+        }
+        const freshPlan = buildPlan({ goal: text, workspaceId, sessionId, edits: validEdits, checks: validChecks, proposalId: resumeId });
+        plan = freshPlan;
+        queue = plan.slice();
+        createdProposalId = resumeId;
+        createdProposalStatus = resumeId ? 'pending' : null;
+        correctionsRemaining = validCorrections.map((round) => round.map((e) => ({ ...e })));
+        try {
+            checkAborted(signal);
+            const created = await cpSvc.create({
+                ownerId: who,
+                sessionId: sessForCp,
+                workspaceId: workspaceId === undefined ? null : workspaceId,
+                state: snapshot()
+            });
+            cpId = created.checkpointId;
+            cpVersion = created.version;
+            emit(onEvent, { type: 'checkpoint_created', checkpointId: cpId, version: cpVersion });
+        } catch (e) {
+            if (isAbortError(e)) throw e;
+            return await finishResume([], [], (e && e.message) || 'checkpoint creation failed', null, (e && e.code) || null);
+        }
+    }
+
+    // P3-9: every completed step persists (crash-safe budgets); an abort
+    // marks the checkpoint cancelled and rethrows — never completed.
+    try {
     while (queue.length > 0) {
         checkAborted(signal);
         if (records.length >= maxSteps) {
-            return finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `agent step limit reached (${maxSteps})` });
+            return await finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `agent step limit reached (${maxSteps})` });
         }
         const step = queue.shift();
         if (step.tool === 'code_context' && contextCalls >= maxContexts) {
-            return finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `context call limit reached (${maxContexts})` });
+            return await finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `context call limit reached (${maxContexts})` });
         }
         if (step.tool === 'test_runner' && testRuns >= maxTests) {
-            return finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `test run limit reached (${maxTests})` });
+            return await finish({ ok: false, code: 'AGENT_STEP_LIMIT', failureReason: `test run limit reached (${maxTests})` });
         }
         const callId = `p37-${records.length + 1}`;
         emit(onEvent, { type: 'tool.started', tool: step.tool, callId });
@@ -402,7 +558,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
                 emit(onEvent, { type: 'proposal_stale', proposalId: createdProposalId });
             }
             emit(onEvent, { type: 'error', message });
-            return finish({ ok: false, code: 'AGENT_TOOL_FAILED', failureReason: message, errorCode: errCode });
+            return await finish({ ok: false, code: 'AGENT_TOOL_FAILED', failureReason: message, errorCode: errCode });
         }
         const rec = {
             id: callId,
@@ -419,6 +575,17 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             tests.push({ tool: step.tool, ...testSummaryFrom(rec) });
         }
         emit(onEvent, { type: 'tool.completed', tool: step.tool, callId });
+        // P3-9: persist after every completed step (crash-safe budgets).
+        // A persist conflict aborts the run as a tool failure; the
+        // terminal finish below retries best-effort.
+        try {
+            await saveCp('running');
+        } catch (e) {
+            if (isAbortError(e)) throw e;
+            const message = (e && e.message) || 'checkpoint persist failed';
+            const errCode = e && typeof e.code === 'string' ? e.code : null;
+            return await finish({ ok: false, code: 'AGENT_TOOL_FAILED', failureReason: message, errorCode: errCode });
+        }
 
         // A freshly proposed change pauses the loop: the agent must not
         // approve its own proposal. The caller resumes later with the
@@ -439,6 +606,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
                     status: createdProposalStatus
                 };
                 correctionsLog.push(entry);
+                correctionsRemaining = correctionsRemaining.slice(1);
                 diagnosis = {
                     attempt: pendingCorrection.attempt,
                     testCode: pendingCorrection.testResult.code,
@@ -452,7 +620,7 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
                 emit(onEvent, { type: 'proposal_created', proposalId: createdProposalId, files });
                 emit(onEvent, { type: 'approval_required', proposalId: createdProposalId, status: createdProposalStatus });
             }
-            return finish({
+            return await finish({
                 ok: false, code: 'APPROVAL_REQUIRED',
                 finalStatus: 'awaiting_approval',
                 failureReason: null,
@@ -473,17 +641,18 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         const isVerify = step.tool === 'test_runner' && resumeId && queue.length === 0;
         const lastTest = tests.length ? tests[tests.length - 1] : null;
         if (isVerify && lastTest && !lastTest.ok) {
-            const used = correctionsLog.length;
-            const attempt = offset + used + 1;
-            if (validCorrections.length > used) {
+            // P3-9: the remaining correction rounds travel in the
+            // checkpoint-persisted queue, not the per-run input.
+            if (correctionsRemaining.length > 0) {
+                const attempt = offset + (correctionsLog.length - logBase) + 1;
                 if (attempt > maxCorrections) {
-                    return finish({ ok: false, code: 'AGENT_CORRECTION_LIMIT', finalStatus: 'correction_limit', failureReason: `correction limit reached (${maxCorrections})` });
+                    return await finish({ ok: false, code: 'AGENT_CORRECTION_LIMIT', finalStatus: 'correction_limit', failureReason: `correction limit reached (${maxCorrections})` });
                 }
                 pendingCorrection = { attempt, testResult: { ok: lastTest.ok, code: lastTest.code, exitCode: lastTest.exitCode } };
                 queue.push(
                     { type: 'inspect', tool: 'code_context', input: { workspaceId, sessionId } },
                     { type: 'status', tool: 'git_status', input: { workspaceId, sessionId } },
-                    { type: 'propose', tool: 'change_propose', input: { workspaceId, sessionId, changes: validCorrections[used] } }
+                    { type: 'propose', tool: 'change_propose', input: { workspaceId, sessionId, changes: correctionsRemaining[0] } }
                 );
                 continue;
             }
@@ -501,16 +670,51 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
     // diagnostic baseline: a fixed-then-green run is completed.
     const lastTest = tests.length ? tests[tests.length - 1] : null;
     if (lastTest && !lastTest.ok) {
-        return finish({ ok: false, code: 'AGENT_COMPLETED', finalStatus: 'tests_failing', failureReason: `tests failing: ${lastTest.code}` });
+        return await finish({ ok: false, code: 'AGENT_COMPLETED', finalStatus: 'tests_failing', failureReason: `tests failing: ${lastTest.code}` });
     }
-    return finish({ ok: true, code: 'AGENT_COMPLETED', finalStatus: 'completed', failureReason: null });
+    return await finish({ ok: true, code: 'AGENT_COMPLETED', finalStatus: 'completed', failureReason: null });
+    } catch (e) {
+        // P3-9: cancellation persists the latest safe state as cancelled
+        // (never completed) and rethrows; files are untouched past the
+        // proposal/apply boundary because no step runs after this.
+        if (isAbortError(e)) {
+            if (cpId) {
+                try {
+                    const rec = await cpSvc.update(cpId, who, {
+                        status: 'cancelled',
+                        state: snapshot({ finalStatus: 'cancelled', failureReason: 'aborted' }),
+                        expectedVersion: cpVersion,
+                        sessionId: sessForCp
+                    });
+                    cpVersion = rec.version;
+                    emit(onEvent, { type: 'checkpoint_cancelled', checkpointId: cpId, version: cpVersion });
+                } catch { /* best effort on the way out */ }
+            }
+        }
+        throw e;
+    }
 
-    function finishResume(stepsDone, toolsDone, failureReason, proposalStatus, errorCode = null) {
+    async function finishResume(stepsDone, toolsDone, failureReason, proposalStatus, errorCode = null) {
+        let versionOut = null;
+        if (cpId) {
+            try {
+                const rec = await cpSvc.update(cpId, who, {
+                    status: 'failed',
+                    state: snapshot({ finalStatus: proposalStatus === 'rejected' ? 'rejected' : 'failed', failureReason, errorCode }),
+                    expectedVersion: cpVersion,
+                    sessionId: sessForCp
+                });
+                cpVersion = rec.version;
+                versionOut = rec.version;
+                emit(onEvent, { type: 'checkpoint_failed', checkpointId: cpId, version: cpVersion });
+            } catch { /* best effort: the result still reports the failure */ }
+        }
         return {
             ok: false, code: 'AGENT_TOOL_FAILED', workspaceId, sessionId,
             goal: text, plan: planSummary(), steps: stepsDone, toolsUsed: toolsDone, tests: [],
             proposalId: resumeId, proposalStatus,
             correctionAttempts: offset, corrections: [], diagnosis: null,
+            checkpointId: cpId, checkpointVersion: versionOut,
             finalStatus: proposalStatus === 'rejected' ? 'rejected' : 'failed', failureReason, errorCode,
             limits: { MAX_AGENT_STEPS: maxSteps, MAX_TEST_RUNS: maxTests, MAX_CONTEXT_CALLS: maxContexts }
         };
@@ -525,7 +729,28 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
         }
     }
 
-    function finish({ ok, code, finalStatus = ok ? 'completed' : 'failed', failureReason = null, errorCode = null, proposalId = createdProposalId, proposalStatus = createdProposalStatus }) {
+    // P3-9 terminal persist: every finished run lands its final status
+    // in the checkpoint (best effort — a persist conflict never masks
+    // the execution result itself).
+    async function finish({ ok, code, finalStatus = ok ? 'completed' : 'failed', failureReason = null, errorCode = null, proposalId = createdProposalId, proposalStatus = createdProposalStatus }) {
+        let versionOut = cpVersion;
+        if (cpId) {
+            const terminal = code === 'APPROVAL_REQUIRED' ? 'waiting_approval' : (ok ? 'completed' : 'failed');
+            try {
+                const rec = await cpSvc.update(cpId, who, {
+                    status: terminal,
+                    state: snapshot({
+                        finalStatus, failureReason, errorCode,
+                        pendingProposalId: terminal === 'waiting_approval' ? proposalId : null
+                    }),
+                    expectedVersion: cpVersion,
+                    sessionId: sessForCp
+                });
+                cpVersion = rec.version;
+                versionOut = rec.version;
+                emit(onEvent, { type: checkpointEventFor(terminal), checkpointId: cpId, version: cpVersion });
+            } catch { /* best effort */ }
+        }
         const result = {
             ok,
             code,
@@ -538,9 +763,11 @@ async function run({ workspaceId = null, sessionId = null, owner = null, goal = 
             tests,
             proposalId,
             proposalStatus,
-            correctionAttempts: offset + correctionsLog.length,
+            correctionAttempts: offset + (correctionsLog.length - logBase),
             corrections: correctionsLog.map((c) => ({ ...c })),
             diagnosis,
+            checkpointId: cpId,
+            checkpointVersion: versionOut,
             finalStatus,
             failureReason,
             errorCode,
