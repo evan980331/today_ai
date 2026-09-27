@@ -30,7 +30,11 @@ async function sendMessage() {
     const spaceId = space ? space.spaceId : 'general';
     // Global single-flight: at most one agent execution system-wide.
     if (activeExecution) {
-        appendSystemMessage(spaceId, `目前 ${getSpaceName(activeExecution.spaceId)} Agent 正在執行，請等待完成或停止目前任務。`);
+        const runConv = getConversation(activeExecution.conversationId);
+        const runLabel = runConv
+            ? `${getSpaceName(runConv.spaceId)}／${runConv.title}`
+            : `${getSpaceName(activeExecution.spaceId)} 正在執行`;
+        appendSystemMessage(activeConversationId, `目前 ${runLabel} 正在執行，請等待完成或停止目前任務。`);
         updateWelcomeVisibility();
         return;
     }
@@ -38,21 +42,30 @@ async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
     if (text.length > 8000) {
-        appendMessage('ai', '訊息過長 (max 8000)', spaceId);
+        appendMessage('ai', '訊息過長 (max 8000)', activeConversationId);
         return;
     }
 
+    const conv = ensureConversation(spaceId);
+    if (!conv) return;
+    setActiveConversationId(conv.conversationId);
+    convStore.active[spaceId] = conv.conversationId;
+    saveConversationStore();
+    autoTitleFromMessage(conv.conversationId, text);
+    refreshSpaces();
+
     welcomeSection.classList.add('hidden');
-    appendMessage('user', text, spaceId);
+    appendMessage('user', text, conv.conversationId);
     input.value = '';
 
-    // The controller belongs to the execution, not to the visible space:
-    // switching spaces never cancels it.
+    // The controller belongs to the execution, not to the visible
+    // conversation: switching never cancels it.
     const controller = new AbortController();
     const execution = {
         executionId: 'ex-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1296).toString(36),
         spaceId,
-        sessionId: getSpaceSession(spaceId),
+        conversationId: conv.conversationId,
+        sessionId: conv.sessionId,
         controller,
         status: 'running'
     };
@@ -61,7 +74,7 @@ async function sendMessage() {
     setRunning(true);
     refreshSpaces();
 
-    const loadingId = appendLoading(spaceId);
+    const loadingId = appendLoading(conv.conversationId);
     try {
         const streamed = await sendMessageStream(text, loadingId, controller, execution);
         if (streamed) return;
@@ -127,13 +140,14 @@ function setStopping() {
     } catch {}
 }
 
-// Streaming path: POST /api/chat/stream (SSE). Events belong to the
-// execution's space (resolved via execution/session, never activeSpaceId);
-// DOM updates land in #messages only when that space is on screen,
-// otherwise they accumulate on detached nodes shown on switch-back.
+// Streaming path: POST /api/chat/stream (SSE). Events belong to a
+// conversation (resolved via execution/conversationId/session, never
+// activeConversationId); DOM updates land in #messages only when that
+// conversation is on screen, otherwise they accumulate on detached nodes
+// shown on switch-back.
 async function sendMessageStream(text, loadingId, controller, execution) {
     if (!controller) return false;
-    const execSpaceId = (execution && execution.spaceId) || activeSpaceId;
+    const execConvId = (execution && execution.conversationId) || activeConversationId;
     let bubble = null;
     let fullText = '';
     let handled = false;
@@ -157,7 +171,7 @@ async function sendMessageStream(text, loadingId, controller, execution) {
         activityList.className = 'space-y-1 pt-1';
         activityBox.appendChild(activityList);
         wrap.appendChild(activityBox);
-        spaceAppend(execSpaceId, wrap);
+        convAppend(execConvId, wrap);
         activityBox._wrap = wrap;
     }
     function upsertActivity(obj) {
@@ -203,12 +217,12 @@ async function sendMessageStream(text, loadingId, controller, execution) {
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             signal: controller.signal,
-            body: JSON.stringify({ prompt: text, sessionId: (execution && execution.sessionId) || getSpaceSession(execSpaceId) })
+            body: JSON.stringify({ prompt: text, sessionId: (execution && execution.sessionId) || null })
         });
         if (res.status === 401) {
             removeLoading(loadingId);
             loginOverlay.classList.remove('hidden');
-            appendMessage('ai', '未授權 (401)：請先登入', execSpaceId);
+            appendMessage('ai', '未授權 (401)：請先登入', execConvId);
             return true;
         }
         const ctype = res.headers.get('content-type') || '';
@@ -233,16 +247,17 @@ async function sendMessageStream(text, loadingId, controller, execution) {
                 if (!data) continue;
                 let obj;
                 try { obj = JSON.parse(data); } catch { continue; }
-                // Route every event to its owning space: explicit sessionId
-                // first, then existing proposal cards, then this execution.
-                // Background spaces accumulate state; only the active space
-                // touches #messages.
-                const targetSpace = resolveEventSpace(obj, execution);
-                const isLive = targetSpace === activeSpaceId;
+                // Route every event to its owning conversation: explicit
+                // conversationId/sessionId first, then existing proposal
+                // cards, then this execution. Never activeConversationId.
+                // Background conversations accumulate state; only the
+                // active conversation touches #messages.
+                const targetConv = resolveEventConversation(obj, execution);
+                const isLive = targetConv === activeConversationId;
                 if (ev === 'text.delta' && obj.content) {
                     let chunk = obj.content;
                     if (!bubble) {
-                        bubble = appendStreamingMessage(targetSpace);
+                        bubble = appendStreamingMessage(targetConv);
                         sawToolActivity = false; // nothing narrated yet: no separator needed
                     } else if (sawToolActivity && /\S/.test(bubble.textContent) && /\S/.test(chunk) &&
                         !bubble.textContent.endsWith('\n\n') && !/^\s/.test(chunk)) {
@@ -260,42 +275,49 @@ async function sendMessageStream(text, loadingId, controller, execution) {
                     // The agent run is NOT complete while cards are pending.
                     sawToolActivity = true;
                     if (obj.proposalId) {
-                        if (obj.changes && obj.changes.length) renderProposalCard(obj, targetSpace);
-                        else fetchProposalAndRender(obj.proposalId, targetSpace);
+                        if (obj.changes && obj.changes.length) renderProposalCard(obj, targetConv);
+                        else fetchProposalAndRender(obj.proposalId, targetConv);
                     }
                 } else if (ev === 'changes_applied' || ev === 'proposal_approved' || ev === 'proposal_rejected' || ev === 'proposal_stale') {
                     sawToolActivity = true;
                     updateProposalCard(obj);
                 } else if (typeof ev === 'string' && ev.indexOf('checkpoint_') === 0) {
                     sawToolActivity = true;
-                    try {
-                        upsertActivity(Object.assign({ type: ev }, obj));
-                    } catch {
-                        upsertActivity(obj);
-                    }
+                    appendCheckpointActivity(targetConv, ev, obj);
                 } else if (ev === 'message.completed' || ev === 'done') {
                     finalizeActivity();
-                    if (!bubble && fullText) bubble = appendStreamingMessage(targetSpace);
+                    if (!bubble && fullText) bubble = appendStreamingMessage(targetConv);
                     // Streaming showed plain text; the final render is Markdown.
                     if (bubble && fullText) renderMarkdownInto(bubble, fullText);
                     else if (bubble) bubble.textContent = fullText || bubble.textContent;
                     let pendingCards = 0;
                     try {
-                        proposalCards.forEach((entry) => { if (entry.state === 'pending' && entry.spaceId === targetSpace) pendingCards += 1; });
+                        proposalCards.forEach((entry) => { if (entry.state === 'pending' && entry.conversationId === targetConv) pendingCards += 1; });
                     } catch {}
                     if (pendingCards > 0) {
                         const note = `有 ${pendingCards} 項修改等待批准，請在上方卡片中批准或拒絕。`;
                         let duplicate = false;
                         try {
-                            messagesDiv.childNodes.forEach((node) => { if (node.textContent === note) duplicate = true; });
+                            const scan = (nodes) => {
+                                for (const node of nodes) {
+                                    if (node && node.textContent === note) { duplicate = true; break; }
+                                }
+                            };
+                            scan(messagesDiv.childNodes || []);
+                            // Background conversations stash their nodes;
+                            // scan the target stash too so a repeated
+                            // completed/done pair cannot double-append.
+                            if (targetConv !== activeConversationId) {
+                                try { scan((convView(targetConv) || {}).nodes || []); } catch {}
+                            }
                         } catch {}
-                        if (!duplicate) appendMessage('ai', note, targetSpace);
+                        if (!duplicate) appendMessage('ai', note, targetConv);
                     }
                     refreshSpaces();
                 } else if (ev === 'error') {
                     const aborted = obj.code === 'ABORTED' || obj.message === 'aborted';
                     finalizeActivity(aborted);
-                    if (!bubble) bubble = appendStreamingMessage(targetSpace);
+                    if (!bubble) bubble = appendStreamingMessage(targetConv);
                     bubble.textContent = aborted ? '已終止。' : `錯誤：${obj.message || '未知錯誤'}`;
                 }
             }
@@ -309,19 +331,19 @@ async function sendMessageStream(text, loadingId, controller, execution) {
         buf += decoder.decode();
         flushEvents();
         if (!bubble && !fullText) {
-            appendMessage('ai', '執行完成，但沒有收到回應內容。', execSpaceId);
+            appendMessage('ai', '執行完成，但沒有收到回應內容。', execConvId);
         }
         return true;
     } catch (err) {
         if (err && err.name === 'AbortError') {
             removeLoading(loadingId);
             finalizeActivity(true);
-            appendMessage('ai', '已終止。', execSpaceId);
+            appendMessage('ai', '已終止。', execConvId);
             return true;
         }
         if (!handled) return false; // network-level failure: try legacy path
         removeLoading(loadingId);
-        if (!bubble) appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', execSpaceId);
+        if (!bubble) appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', execConvId);
         return true;
     } finally {
         if (currentStreamController === controller) currentStreamController = null;
@@ -329,8 +351,8 @@ async function sendMessageStream(text, loadingId, controller, execution) {
 }
 
 async function sendMessageLegacy(text, loadingId, signal, execution) {
-    const spaceId = (execution && execution.spaceId) || activeSpaceId;
-    const sessionId = (execution && execution.sessionId) || getSpaceSession(spaceId);
+    const convId = (execution && execution.conversationId) || activeConversationId;
+    const sessionId = (execution && execution.sessionId) || null;
     try {
         const res = await fetch('/api/chat', {
             method: 'POST',
@@ -344,7 +366,7 @@ async function sendMessageLegacy(text, loadingId, signal, execution) {
         if (!res.ok) {
             if (res.status === 401) {
                 loginOverlay.classList.remove('hidden');
-                appendMessage('ai', '未授權 (401)：請先登入', spaceId);
+                appendMessage('ai', '未授權 (401)：請先登入', convId);
                 return;
             }
             let msg = `錯誤 ${res.status}: ${escapeHtml(data.error || '未知錯誤')}`;
@@ -353,22 +375,22 @@ async function sendMessageLegacy(text, loadingId, signal, execution) {
             else if (res.status === 503) msg = 'OpenCode runtime 暫時不可用 (503)：請稍後重試';
             else if (res.status === 500) msg = `執行失敗 (500)：${escapeHtml((data.details || data.error || '').slice(0,300))}`;
             else if (data.details) msg += `\n${escapeHtml(data.details.slice(0,300))}`;
-            appendMessage('ai', msg, spaceId);
+            appendMessage('ai', msg, convId);
             return;
         }
         if (data.result) {
-            appendMessage('ai', data.result, spaceId);
+            appendMessage('ai', data.result, convId);
             refreshSpaces();
         } else {
-            appendMessage('ai', '執行失敗：' + escapeHtml(data.error || '無回應'), spaceId);
+            appendMessage('ai', '執行失敗：' + escapeHtml(data.error || '無回應'), convId);
         }
     } catch (err) {
         removeLoading(loadingId);
         if (err && err.name === 'AbortError') {
-            appendMessage('ai', '已終止。', spaceId);
+            appendMessage('ai', '已終止。', convId);
             return;
         }
-        appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', spaceId);
+        appendMessage('ai', '連線失敗，請確認後端 Bridge Server 是否已啟動。', convId);
     }
 }
 window.sendMessage = sendMessage;
@@ -451,11 +473,12 @@ async function doLogout() {
     try {
         await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } catch {}
-    // Reset per-space UI state (spaces/sessions persist for next login).
+    // Reset per-conversation UI state (spaces/sessions/conversations
+    // persist for next login).
     try {
         activeExecution = null;
         currentStreamController = null;
-        for (const k of Object.keys(spaceViews)) delete spaceViews[k];
+        for (const k of Object.keys(convViews)) delete convViews[k];
         proposalCards.clear();
         clearContainer(messagesDiv);
     } catch {}
@@ -529,9 +552,11 @@ let isRunning = false;
 
 
 // Streaming AI bubble: same styling as appendMessage('ai'), but returns the
-// text node so chunks can update it incrementally (textContent = XSS-safe).
-function appendStreamingMessage(spaceId) {
-    const target = spaceId || activeSpaceId;
+// bubble element so chunks can update it incrementally (textContent during
+// streaming; Markdown only on message.completed). Nodes route to the
+// owning conversation; only the active one touches #messages.
+function appendStreamingMessage(convId) {
+    const target = convId || activeConversationId;
     const wrapper = document.createElement('div');
     wrapper.className = 'flex justify-start min-w-0';
     const bubble = document.createElement('div');
@@ -539,13 +564,13 @@ function appendStreamingMessage(spaceId) {
     bubble.style.overflowWrap = 'anywhere';
     bubble.textContent = '';
     wrapper.appendChild(bubble);
-    spaceAppend(target, wrapper);
-    if (target === activeSpaceId) scrollToBottom();
+    convAppend(target, wrapper);
+    if (target === activeConversationId) scrollToBottom();
     return bubble;
 }
 
-function appendMessage(role, content, spaceId) {
-    const target = spaceId || activeSpaceId;
+function appendMessage(role, content, convId) {
+    const target = convId || activeConversationId;
     const wrapper = document.createElement('div');
     if (role === 'user') {
         wrapper.className = 'justify-end flex min-w-0';
@@ -570,11 +595,11 @@ function appendMessage(role, content, spaceId) {
         renderMarkdownInto(bubble, content);
         wrapper.appendChild(bubble);
     }
-    spaceAppend(target, wrapper);
-    if (target === activeSpaceId) scrollToBottom();
+    convAppend(target, wrapper);
+    if (target === activeConversationId) scrollToBottom();
 }
 
-function appendLoading(spaceId) {
+function appendLoading(convId) {
     const id = 'loading-' + Date.now();
     const wrapper = document.createElement('div');
     wrapper.id = id;
@@ -585,8 +610,8 @@ function appendLoading(spaceId) {
         </div>
     `;
     loadingNodes[id] = wrapper;
-    spaceAppend(spaceId || activeSpaceId, wrapper);
-    if ((spaceId || activeSpaceId) === activeSpaceId) scrollToBottom();
+    convAppend(convId || activeConversationId, wrapper);
+    if ((convId || activeConversationId) === activeConversationId) scrollToBottom();
     return id;
 }
 
@@ -610,30 +635,25 @@ async function loadHistory() {
 }
 
 function switchSession(id) {
-    // Legacy single-session API kept as a shim: route to the space that
-    // owns the session, or fall back to the active space.
+    // Legacy single-session API kept as a shim: route to the conversation
+    // that owns the session, or fall back to the active conversation.
     try {
         if (typeof id === 'string' && id) {
+            const conv = conversationBySession(id);
+            if (conv && conv.conversationId !== activeConversationId) { switchConversation(conv.conversationId); return; }
             const sp = spaceBySession(id);
             if (sp && sp !== activeSpaceId) { switchSpace(sp); return; }
         }
     } catch {}
-    loadHistoryForSpace(activeSpaceId);
+    const active = getActiveConversation();
+    if (active) loadHistoryForConversation(active.conversationId);
     refreshSpaces();
 }
 window.switchSession = switchSession;
 
 function createNewSession() {
-    // Legacy "new chat" maps to clearing the active space view and
-    // reloading its server history.
-    try {
-        const view = spaceView(activeSpaceId);
-        view.nodes = [];
-        view.historyLoaded = false;
-        clearContainer(messagesDiv);
-    } catch {}
-    updateWelcomeVisibility();
-    loadHistoryForSpace(activeSpaceId);
+    // Legacy "new chat" maps to a fresh conversation in the active space.
+    newConversation(activeSpaceId);
 }
 window.createNewSession = createNewSession;
 
@@ -655,7 +675,7 @@ checkAuth().then(ok => {
     refreshSpaces();
     updateActiveSpaceHeader();
     if (ok) {
-        loadHistoryForSpace(activeSpaceId);
+        switchSpace(activeSpaceId);
     }
 });
 
@@ -996,21 +1016,46 @@ function renderDiffLine(line) {
     return div;
 }
 
-function renderProposalCard(payload, spaceId) {
+function renderProposalCard(payload, convId) {
     const data = payload && typeof payload === 'object' ? payload : {};
     const proposalId = typeof data.proposalId === 'string' ? data.proposalId : '';
     if (!proposalId) return null;
     if (proposalCards.has(proposalId)) return proposalCards.get(proposalId).root;
-    // Space binding: explicit arg wins, then payload, then the session
-    // mapping, then the visible space. Approval later uses the card's own
-    // sessionId — never the then-active space.
-    let target = (typeof spaceId === 'string' && getSpace(spaceId)) ? spaceId : null;
-    if (!target && typeof data.spaceId === 'string' && getSpace(data.spaceId)) target = data.spaceId;
-    if (!target && typeof data.sessionId === 'string') target = spaceBySession(data.sessionId);
-    if (!target) target = activeSpaceId;
+    // Conversation binding: explicit arg wins, then payload, then the
+    // session mapping, then the visible conversation. Approval later uses
+    // the card's own sessionId — never the then-active conversation.
+    let targetConv = (typeof convId === 'string' && getConversation(convId)) ? convId : null;
+    if (!targetConv && typeof data.conversationId === 'string' && getConversation(data.conversationId)) {
+        targetConv = data.conversationId;
+    }
+    if (!targetConv && typeof data.sessionId === 'string') {
+        const mapped = conversationBySession(data.sessionId);
+        if (mapped) targetConv = mapped.conversationId;
+        else {
+            const bySpace = spaceBySession(data.sessionId);
+            if (bySpace) {
+                const ensured = ensureConversation(bySpace);
+                if (ensured) targetConv = ensured.conversationId;
+            }
+        }
+    }
+    if (!targetConv) {
+        const active = getActiveConversation() || ensureConversation(activeSpaceId);
+        targetConv = active ? active.conversationId : activeConversationId;
+        // Nothing is active yet (e.g. first render on a fresh view):
+        // adopt the fallback conversation so the card is visible.
+        if (targetConv && !activeConversationId && getConversation(targetConv)) {
+            setActiveConversationId(targetConv);
+            try {
+                convStore.active[getConversation(targetConv).spaceId] = targetConv;
+                saveConversationStore();
+            } catch {}
+        }
+    }
+    const targetSpace = getConversation(targetConv) ? getConversation(targetConv).spaceId : activeSpaceId;
     const cardSession = (typeof data.sessionId === 'string' && validSessionId(data.sessionId))
         ? data.sessionId
-        : getSpaceSession(target);
+        : (getConversation(targetConv) ? getConversation(targetConv).sessionId : null);
     const changes = Array.isArray(data.changes) ? data.changes : [];
 
     const wrapper = document.createElement('div');
@@ -1083,9 +1128,9 @@ function renderProposalCard(payload, spaceId) {
     btnRow.appendChild(approveBtn);
     card.appendChild(btnRow);
 
-    spaceAppend(target, wrapper);
-    if (target === activeSpaceId) scrollToBottom();
-    proposalCards.set(proposalId, { root: wrapper, statusEl, approveBtn, rejectBtn, state: 'pending', spaceId: target, sessionId: cardSession, payload: data });
+    convAppend(targetConv, wrapper);
+    if (targetConv === activeConversationId) scrollToBottom();
+    proposalCards.set(proposalId, { root: wrapper, statusEl, approveBtn, rejectBtn, state: 'pending', spaceId: targetSpace, conversationId: targetConv, sessionId: cardSession, payload: data });
     return wrapper;
 }
 
@@ -1153,17 +1198,22 @@ async function decideProposal(proposalId, action) {
     }
 }
 
-async function fetchProposalAndRender(proposalId, spaceId) {
+async function fetchProposalAndRender(proposalId, convId) {
     if (!proposalId || proposalCards.has(proposalId)) return proposalCards.get(proposalId) || null;
-    const target = (typeof spaceId === 'string' && getSpace(spaceId)) ? spaceId : activeSpaceId;
+    let targetConv = (typeof convId === 'string' && getConversation(convId)) ? convId : null;
+    if (!targetConv) {
+        const active = getActiveConversation();
+        targetConv = active ? active.conversationId : activeConversationId;
+    }
     try {
-        const sess = getSpaceSession(target);
+        const conv = getConversation(targetConv);
+        const sess = conv ? conv.sessionId : null;
         const qs = sess ? `?sessionId=${encodeURIComponent(sess)}` : '';
         const res = await fetch(`/api/change-proposals/${encodeURIComponent(proposalId)}${qs}`, { credentials: 'include' });
         if (!res.ok) return null;
         const data = await res.json().catch(() => null);
         if (!data || data.proposalId !== proposalId) return null;
-        renderProposalCard(data, target);
+        renderProposalCard(data, targetConv);
         if (data.status && data.status !== 'pending') {
             setProposalState(proposalId, data.status, data.status === 'applied' ? '已套用' : data.status === 'rejected' ? '已拒絕' : `狀態：${data.status}`);
         }
@@ -1260,6 +1310,9 @@ function loadSpaceSessions() {
         if (legacy && validSessionId(legacy) && !clean.general) {
             clean.general = legacy;
             try { localStorage.removeItem('todayai_session'); } catch {}
+            // Persist immediately: the conversation migration below runs
+            // after us and must still see this session.
+            try { localStorage.setItem('todayai_space_sessions', JSON.stringify(clean)); } catch {}
         }
     } catch {}
     return clean;
@@ -1287,21 +1340,49 @@ function spaceBySession(sessionId) {
     return null;
 }
 
-// SSE identity: explicit event sessionId first, then an existing proposal
-// card, then the running execution. Never activeSpaceId on its own.
-function resolveEventSpace(obj, execution) {
+// SSE identity: explicit conversationId first, then sessionId mapping
+// (conversation, then legacy space), then an existing proposal card,
+// then the running execution. Never activeConversationId on its own.
+function resolveEventConversation(obj, execution) {
     try {
+        if (obj && typeof obj.conversationId === 'string' && getConversation(obj.conversationId)) {
+            return obj.conversationId;
+        }
         if (obj && typeof obj.sessionId === 'string') {
-            const bySession = spaceBySession(obj.sessionId);
-            if (bySession) return bySession;
+            const conv = conversationBySession(obj.sessionId);
+            if (conv) return conv.conversationId;
+            const bySpace = spaceBySession(obj.sessionId);
+            if (bySpace) {
+                const c = ensureConversation(bySpace);
+                if (c) return c.conversationId;
+            }
         }
         if (obj && obj.proposalId && proposalCards.has(obj.proposalId)) {
-            const sp = proposalCards.get(obj.proposalId).spaceId;
-            if (sp) return sp;
+            const cid = proposalCards.get(obj.proposalId).conversationId;
+            if (cid) return cid;
         }
     } catch {}
-    if (execution && execution.spaceId) return execution.spaceId;
-    return activeSpaceId;
+    if (execution && execution.conversationId) return execution.conversationId;
+    const active = getActiveConversation();
+    if (active) return active.conversationId;
+    return activeConversationId;
+}
+
+// Checkpoint status lines always land in the owning conversation's view
+// (live or stashed), independent of which stream is running.
+function appendCheckpointActivity(convId, ev, obj) {
+    const o = (obj && typeof obj === 'object') ? obj : {};
+    const label = String(ev).slice('checkpoint_'.length);
+    const cp = o.checkpointId ? ` · ${String(o.checkpointId).slice(0, 13)}` : '';
+    const div = document.createElement('div');
+    div.className = 'flex items-start gap-2 text-xs text-slate-400 break-words';
+    try { div.style.overflowWrap = 'anywhere'; } catch {}
+    div.textContent = `◈ checkpoint ${label}${cp}`;
+    convAppend(convId, div);
+    if (convId === activeConversationId) {
+        try { scrollToBottom(); } catch {}
+    }
+    return div;
 }
 
 function loadActiveSpaceId() {
@@ -1321,13 +1402,225 @@ function getActiveSpace() {
     return getSpace(activeSpaceId) || getSpace('general');
 }
 
-// Per-space detached DOM stash. Switching moves live nodes (listeners and
-// proposal card refs survive the move); background streams keep mutating
-// their detached nodes and become visible on switch-back.
-const spaceViews = {}; // spaceId -> { nodes: [], historyLoaded: false }
-function spaceView(spaceId) {
-    if (!spaceViews[spaceId]) spaceViews[spaceId] = { nodes: [], historyLoaded: false };
-    return spaceViews[spaceId];
+// --- Space → Conversations ---
+// A Space owns an ordered list of Conversations; each Conversation owns
+// exactly one chat session. Message/activity/proposal views are keyed by
+// conversation, never by space. Agent runtime stays global (one flight).
+const CONVERSATION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const CONVERSATION_TITLE_MAX = 40;
+const CONVERSATION_AUTO_TITLE_MAX = 30;
+const DEFAULT_CONVERSATION_TITLE = '新對話';
+
+function newConversationId() {
+    let id = null;
+    try { id = crypto.randomUUID(); } catch {}
+    if (typeof id === 'string' && id) return 'conversation-' + id.slice(0, 8);
+    return 'conversation-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+function newSessionId() {
+    let id = null;
+    try { id = crypto.randomUUID(); } catch {}
+    if (validSessionId(id)) return id;
+    return 'space-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+function validConversation(c) {
+    return c && typeof c === 'object' && !Array.isArray(c)
+        && typeof c.conversationId === 'string' && CONVERSATION_ID_RE.test(c.conversationId)
+        && typeof c.spaceId === 'string' && getSpace(c.spaceId)
+        && typeof c.sessionId === 'string' && validSessionId(c.sessionId)
+        && typeof c.title === 'string' && c.title.length >= 1 && c.title.length <= CONVERSATION_TITLE_MAX;
+}
+
+function emptyConversationStore() {
+    return { version: 1, conversations: {}, order: {}, active: {} };
+}
+
+function loadConversationStore() {
+    let parsed = null;
+    try {
+        const raw = localStorage.getItem('todayai_conversations');
+        if (raw) parsed = JSON.parse(raw);
+    } catch {}
+    if (parsed && typeof parsed === 'object' && parsed.conversations && typeof parsed.conversations === 'object') {
+        const store = emptyConversationStore();
+        for (const id of Object.keys(parsed.conversations)) {
+            const c = parsed.conversations[id];
+            if (validConversation(c) && c.conversationId === id) store.conversations[id] = { ...c };
+        }
+        const order = (parsed.order && typeof parsed.order === 'object') ? parsed.order : {};
+        for (const sid of Object.keys(order)) {
+            if (getSpace(sid) && Array.isArray(order[sid])) {
+                store.order[sid] = order[sid].filter((id) => store.conversations[id] && store.conversations[id].spaceId === sid);
+            }
+        }
+        const active = (parsed.active && typeof parsed.active === 'object') ? parsed.active : {};
+        for (const sid of Object.keys(active)) {
+            if (getSpace(sid) && store.conversations[active[sid]] && store.conversations[active[sid]].spaceId === sid) {
+                store.active[sid] = active[sid];
+            }
+        }
+        return store;
+    }
+    // One-time legacy migration (key absence = not migrated yet):
+    // todayai_space_sessions { spaceId: sessionId } and the older
+    // todayai_session singular become one conversation per space, keeping
+    // the original sessionIds so existing histories survive.
+    const store = emptyConversationStore();
+    let legacyMap = {};
+    try {
+        const raw = localStorage.getItem('todayai_space_sessions');
+        if (raw) {
+            const p = JSON.parse(raw);
+            if (p && typeof p === 'object' && !Array.isArray(p)) legacyMap = p;
+        }
+    } catch {}
+    for (const sid of Object.keys(legacyMap)) {
+        const space = getSpace(sid);
+        if (!space || !validSessionId(legacyMap[sid])) continue;
+        if ((store.order[sid] || []).length > 0) continue;
+        const cid = 'conversation-legacy-' + sid;
+        const title = sid === 'general' ? '一般對話' : space.name.slice(0, CONVERSATION_TITLE_MAX);
+        store.conversations[cid] = { conversationId: cid, spaceId: sid, sessionId: legacyMap[sid], title, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        store.order[sid] = [cid];
+        store.active[sid] = cid;
+    }
+    try {
+        const singular = localStorage.getItem('todayai_session');
+        if (singular && validSessionId(singular) && (store.order.general || []).length === 0) {
+            const cid = 'conversation-legacy-general';
+            store.conversations[cid] = { conversationId: cid, spaceId: 'general', sessionId: singular, title: '一般對話', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+            store.order.general = [cid];
+            store.active.general = cid;
+        }
+    } catch {}
+    saveConversationStore(store);
+    return store;
+}
+
+function saveConversationStore(store) {
+    try { localStorage.setItem('todayai_conversations', JSON.stringify(store || convStore)); } catch {}
+}
+
+let convStore = loadConversationStore();
+let activeConversationId = null;
+try {
+    const v = localStorage.getItem('todayai_active_conversation');
+    if (v && convStore.conversations[v]) activeConversationId = v;
+} catch {}
+
+function setActiveConversationId(id) {
+    activeConversationId = id;
+    try {
+        if (id) localStorage.setItem('todayai_active_conversation', id);
+        else localStorage.removeItem('todayai_active_conversation');
+    } catch {}
+}
+
+function listConversations(spaceId) {
+    const ids = (convStore.order[spaceId] || []).filter((id) => convStore.conversations[id]);
+    return ids.map((id) => convStore.conversations[id]);
+}
+
+function getConversation(convId) {
+    if (typeof convId !== 'string') return null;
+    return convStore.conversations[convId] || null;
+}
+
+function createConversation(spaceId, title) {
+    const space = getSpace(spaceId);
+    if (!space) return null;
+    const name = (typeof title === 'string' && title.trim()) ? title.trim().slice(0, CONVERSATION_TITLE_MAX) : DEFAULT_CONVERSATION_TITLE;
+    let cid = newConversationId();
+    if (!CONVERSATION_ID_RE.test(cid) || convStore.conversations[cid]) {
+        cid = 'conversation-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+    }
+    const now = new Date().toISOString();
+    const conv = { conversationId: cid, spaceId, sessionId: newSessionId(), title: name, createdAt: now, updatedAt: now };
+    convStore.conversations[cid] = conv;
+    if (!Array.isArray(convStore.order[spaceId])) convStore.order[spaceId] = [];
+    convStore.order[spaceId].push(cid);
+    convStore.active[spaceId] = cid;
+    saveConversationStore();
+    return conv;
+}
+
+function touchConversation(convId) {
+    const c = getConversation(convId);
+    if (!c) return;
+    c.updatedAt = new Date().toISOString();
+    saveConversationStore();
+}
+
+function setConversationTitle(convId, title) {
+    const c = getConversation(convId);
+    if (!c || typeof title !== 'string') return false;
+    const t = title.replace(/\s+/g, ' ').trim().slice(0, CONVERSATION_TITLE_MAX);
+    if (!t) return false;
+    c.title = t;
+    c.updatedAt = new Date().toISOString();
+    saveConversationStore();
+    return true;
+}
+
+function autoTitleFromMessage(convId, text) {
+    const c = getConversation(convId);
+    if (!c || c.title !== DEFAULT_CONVERSATION_TITLE) return;
+    const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, CONVERSATION_AUTO_TITLE_MAX);
+    if (t) setConversationTitle(convId, t);
+}
+
+function getActiveConversation() {
+    if (activeConversationId && convStore.conversations[activeConversationId]) {
+        return convStore.conversations[activeConversationId];
+    }
+    return null;
+}
+
+// Every space always resolves to a conversation: last-active, first, or
+// a freshly created empty one ("新對話").
+function ensureConversation(spaceId) {
+    const space = getSpace(spaceId);
+    if (!space) return null;
+    const last = convStore.active[spaceId];
+    if (last && convStore.conversations[last] && convStore.conversations[last].spaceId === spaceId) {
+        return convStore.conversations[last];
+    }
+    const list = listConversations(spaceId);
+    if (list.length > 0) {
+        convStore.active[spaceId] = list[0].conversationId;
+        saveConversationStore();
+        return list[0];
+    }
+    return createConversation(spaceId, DEFAULT_CONVERSATION_TITLE);
+}
+
+function conversationBySession(sessionId) {
+    if (!validSessionId(sessionId)) return null;
+    for (const id of Object.keys(convStore.conversations)) {
+        if (convStore.conversations[id].sessionId === sessionId) return convStore.conversations[id];
+    }
+    return null;
+}
+
+// Per-conversation detached DOM stash (replaces space-level stash:
+// a Space is a navigation container, the Conversation owns the view).
+const convViews = {}; // conversationId -> { nodes: [], historyLoaded: false }
+function convView(convId) {
+    if (!convViews[convId]) convViews[convId] = { nodes: [], historyLoaded: false };
+    return convViews[convId];
+}
+
+function convAppend(convId, node) {
+    if (!node) return null;
+    if (convId === activeConversationId) {
+        try { messagesDiv.appendChild(node); } catch { return null; }
+    } else {
+        convView(convId).nodes.push(node);
+    }
+    try { scrollToBottom(); } catch {}
+    return node;
 }
 
 function clearContainer(el) {
@@ -1342,20 +1635,10 @@ function clearContainer(el) {
     } catch {}
 }
 
-function spaceAppend(spaceId, node) {
-    if (!node) return null;
-    if (spaceId === activeSpaceId) {
-        try { messagesDiv.appendChild(node); } catch { return null; }
-    } else {
-        spaceView(spaceId).nodes.push(node);
-    }
-    try { scrollToBottom(); } catch {}
-    return node;
-}
-
-// Global single-flight execution. activeSpaceId is only "what the user
-// looks at"; activeExecution is "what is running". They are independent.
-let activeExecution = null; // { executionId, spaceId, sessionId, controller, status }
+// Global single-flight execution. activeSpaceId/activeConversationId only
+// describe "what the user looks at"; activeExecution is "what is running".
+// They are independent.
+let activeExecution = null; // { executionId, spaceId, conversationId, sessionId, controller, status }
 
 function refreshSpaces() {
     renderSpaceList();
@@ -1368,10 +1651,10 @@ function renderSpaceList() {
     if (!listEl) return;
     clearContainer(listEl);
     for (const s of allSpaces()) {
+        const isActiveSpace = s.spaceId === activeSpaceId;
+        const expanded = isActiveSpace && !collapsedSpaces.has(s.spaceId);
         const row = document.createElement('div');
-        const isActive = s.spaceId === activeSpaceId;
-        const isRunning = !!activeExecution && activeExecution.spaceId === s.spaceId;
-        row.className = `flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition min-h-[44px] ${isActive ? 'bg-slate-800 text-indigo-300 border border-slate-700' : 'hover:bg-slate-800/60 text-slate-400 hover:text-slate-200'}`;
+        row.className = `flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition min-h-[44px] ${isActiveSpace ? 'bg-slate-800 text-indigo-300 border border-slate-700' : 'hover:bg-slate-800/60 text-slate-400 hover:text-slate-200'}`;
         row.dataset.spaceId = s.spaceId;
         const icon = document.createElement('span');
         icon.className = 'text-base leading-none shrink-0';
@@ -1390,16 +1673,58 @@ function renderSpaceList() {
         }
         row.appendChild(icon);
         row.appendChild(nameWrap);
-        if (isRunning) {
-            const dot = document.createElement('span');
-            dot.className = 'text-[10px] text-emerald-300 shrink-0 flex items-center gap-1';
-            dot.textContent = '● Running';
-            row.appendChild(dot);
-        }
-        row.addEventListener('click', () => switchSpace(s.spaceId));
+        const caret = document.createElement('span');
+        caret.className = 'text-[10px] text-slate-500 shrink-0';
+        caret.textContent = expanded ? '˅' : '˃';
+        row.appendChild(caret);
+        row.addEventListener('click', () => onSpaceRowClick(s.spaceId));
         try { listEl.appendChild(row); } catch {}
+        if (!expanded) continue;
+        const convs = listConversations(s.spaceId);
+        for (const c of convs) {
+            const isActiveConv = c.conversationId === activeConversationId;
+            const isRunning = !!activeExecution && activeExecution.conversationId === c.conversationId;
+            const crow = document.createElement('div');
+            crow.className = `flex items-center gap-2 pl-8 pr-2.5 py-1.5 rounded-lg cursor-pointer transition min-h-[36px] ${isActiveConv ? 'bg-slate-800/80 text-indigo-200 border border-slate-700/60' : 'hover:bg-slate-800/40 text-slate-400 hover:text-slate-200'}`;
+            crow.dataset.conversationId = c.conversationId;
+            crow.dataset.spaceId = s.spaceId;
+            const title = document.createElement('div');
+            title.className = 'text-xs truncate flex-1 min-w-0 text-left';
+            title.textContent = c.title;
+            crow.appendChild(title);
+            if (isRunning) {
+                const dot = document.createElement('span');
+                dot.className = 'text-[10px] text-emerald-300 shrink-0';
+                dot.textContent = '● Running';
+                crow.appendChild(dot);
+            }
+            crow.addEventListener('click', () => switchConversation(c.conversationId));
+            try { listEl.appendChild(crow); } catch {}
+        }
+        const addRow = document.createElement('div');
+        addRow.className = 'flex items-center gap-2 pl-8 pr-2.5 py-1.5 rounded-lg cursor-pointer transition min-h-[44px] text-slate-500 hover:text-slate-300 hover:bg-slate-800/40';
+        const addLabel = document.createElement('div');
+        addLabel.className = 'text-xs';
+        addLabel.textContent = '＋ 新對話';
+        addRow.appendChild(addLabel);
+        addRow.addEventListener('click', () => newConversation(s.spaceId));
+        try { listEl.appendChild(addRow); } catch {}
     }
     try { if (window.lucide) lucide.createIcons(); } catch {}
+}
+
+// Collapsed state never changes the active space/conversation: it only
+// hides the list. Persisted per boot (in-memory).
+const collapsedSpaces = new Set();
+
+function onSpaceRowClick(spaceId) {
+    if (spaceId !== activeSpaceId) {
+        switchSpace(spaceId);
+        return;
+    }
+    if (collapsedSpaces.has(spaceId)) collapsedSpaces.delete(spaceId);
+    else collapsedSpaces.add(spaceId);
+    renderSpaceList();
 }
 
 function updateActiveSpaceHeader() {
@@ -1425,22 +1750,46 @@ function closeDrawer() {
 function switchSpace(spaceId) {
     const space = getSpace(spaceId);
     if (!space) return false;
-    if (spaceId === activeSpaceId) {
-        try { closeDrawer(); } catch {}
-        return true;
+    if (spaceId !== activeSpaceId) {
+        setActiveSpaceId(spaceId);
+        collapsedSpaces.delete(spaceId);
     }
-    // Stash live nodes of the outgoing space.
-    try {
-        const current = [];
+    const conv = ensureConversation(spaceId);
+    if (!conv) return false;
+    return renderConversation(conv.conversationId, true);
+}
+
+function switchConversation(convId) {
+    const conv = getConversation(convId);
+    if (!conv) return false;
+    if (conv.spaceId !== activeSpaceId) {
+        setActiveSpaceId(conv.spaceId);
+        collapsedSpaces.delete(conv.spaceId);
+    }
+    return renderConversation(convId, true);
+}
+
+// Render one conversation: stash the outgoing view, restore the target
+// view, load server history on first visit. Never creates execution.
+function renderConversation(convId, closeAfter) {
+    const conv = getConversation(convId);
+    if (!conv) return false;
+    const prev = activeConversationId;
+    if (prev && prev !== convId) {
         try {
-            const kids = messagesDiv.childNodes;
-            for (let i = 0; i < kids.length; i++) current.push(kids[i]);
+            const current = [];
+            try {
+                const kids = messagesDiv.childNodes;
+                for (let i = 0; i < kids.length; i++) current.push(kids[i]);
+            } catch {}
+            convView(prev).nodes = current;
         } catch {}
-        spaceView(activeSpaceId).nodes = current;
-    } catch {}
+    }
     clearContainer(messagesDiv);
-    setActiveSpaceId(spaceId);
-    const view = spaceView(spaceId);
+    setActiveConversationId(convId);
+    convStore.active[conv.spaceId] = convId;
+    saveConversationStore();
+    const view = convView(convId);
     for (const nd of view.nodes) {
         try { messagesDiv.appendChild(nd); } catch {}
     }
@@ -1448,13 +1797,29 @@ function switchSpace(spaceId) {
     updateActiveSpaceHeader();
     renderSpaceList();
     if (view.nodes.length === 0 && !view.historyLoaded) {
-        loadHistoryForSpace(spaceId);
+        loadHistoryForConversation(convId);
     } else {
         updateWelcomeVisibility();
     }
-    try { closeDrawer(); } catch {}
+    if (closeAfter !== false) {
+        try { closeDrawer(); } catch {}
+    }
     try { scrollToBottom(); } catch {}
     return true;
+}
+
+function newConversation(spaceId) {
+    const target = getSpace(spaceId) ? spaceId : activeSpaceId;
+    const conv = createConversation(target, DEFAULT_CONVERSATION_TITLE);
+    if (!conv) return null;
+    if (target !== activeSpaceId) {
+        setActiveSpaceId(target);
+        collapsedSpaces.delete(target);
+    }
+    renderConversation(conv.conversationId, false);
+    try { closeDrawer(); } catch {}
+    try { if (input) input.focus(); } catch {}
+    return conv;
 }
 
 function updateWelcomeVisibility() {
@@ -1465,22 +1830,41 @@ function updateWelcomeVisibility() {
     } catch {}
 }
 
-async function loadHistoryForSpace(spaceId) {
-    const view = spaceView(spaceId);
-    const sessionId = getSpaceSession(spaceId);
+async function loadHistoryForConversation(convId) {
+    const conv = getConversation(convId);
+    if (!conv) return;
+    const view = convView(convId);
     try {
-        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(sessionId)}&limit=100`, { credentials: 'include' });
+        const res = await fetch(`/api/history?sessionId=${encodeURIComponent(conv.sessionId)}&limit=100`, { credentials: 'include' });
         if (res.status === 401) { try { loginOverlay.classList.remove('hidden'); } catch {} return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const rows = await res.json();
         view.historyLoaded = true;
         if (Array.isArray(rows) && rows.length > 0) {
-            for (const r of rows) appendMessage(r.role === 'user' ? 'user' : 'ai', r.content, spaceId);
-            if (spaceId === activeSpaceId) updateWelcomeVisibility();
-        } else if (spaceId === activeSpaceId) {
+            for (const r of rows) appendMessage(r.role === 'user' ? 'user' : 'ai', r.content, convId);
+            if (convId === activeConversationId) updateWelcomeVisibility();
+        } else if (convId === activeConversationId) {
             updateWelcomeVisibility();
         }
-    } catch (e) { try { console.warn('history load failed', e); } catch {} }
+    } catch (e) {
+        try { console.warn('history load failed', e); } catch {}
+        // Error state, shown once and only while this conversation is
+        // still the visible empty view (stale fetches after a switch
+        // stay silent; the next visit retries).
+        try {
+            if (convId !== activeConversationId) return;
+            const kids = messagesDiv.childNodes || [];
+            for (const k of kids) {
+                if (k && !k.removed) return;
+            }
+            appendMessage('system', '歷史載入失敗，請切換後再試。', convId);
+        } catch {}
+    }
+}
+
+async function loadHistoryForSpace(spaceId) {
+    const conv = ensureConversation(spaceId);
+    if (conv) return loadHistoryForConversation(conv.conversationId);
 }
 
 function toggleNewAgentForm() {
@@ -1500,7 +1884,10 @@ function createAgentSpace() {
         desc = (document.getElementById('new-agent-desc').value || '').trim();
     } catch {}
     if (!name || name.length > 40) {
-        try { appendSystemMessage(activeSpaceId, '名稱不可為空（最多 40 字）。'); } catch {}
+        try {
+            const active = getActiveConversation();
+            appendSystemMessage(active ? active.conversationId : activeConversationId, '名稱不可為空（最多 40 字）。');
+        } catch {}
         return false;
     }
     if (icon && icon.length > 8) icon = icon.slice(0, 8);
@@ -1523,7 +1910,7 @@ function createAgentSpace() {
     return true;
 }
 
-function appendSystemMessage(spaceId, text) {
+function appendSystemMessage(convId, text) {
     const wrapper = document.createElement('div');
     wrapper.className = 'flex justify-center min-w-0';
     const div = document.createElement('div');
@@ -1531,10 +1918,22 @@ function appendSystemMessage(spaceId, text) {
     div.style.overflowWrap = 'anywhere';
     div.textContent = text;
     wrapper.appendChild(div);
-    return spaceAppend(spaceId, wrapper);
+    convAppend(convId, wrapper);
+    if ((convId || activeConversationId) === activeConversationId) {
+        try { scrollToBottom(); } catch {}
+    }
+    return wrapper;
 }
 
 window.switchSpace = switchSpace;
+window.switchConversation = switchConversation;
+window.newConversation = newConversation;
+window.createConversation = createConversation;
+window.getConversation = getConversation;
+window.getActiveConversation = getActiveConversation;
+window.getActiveConversationId = function () { return activeConversationId; };
+window.listConversations = listConversations;
+window.conversationBySession = conversationBySession;
 window.createAgentSpace = createAgentSpace;
 window.toggleNewAgentForm = toggleNewAgentForm;
 window.getActiveSpace = getActiveSpace;
