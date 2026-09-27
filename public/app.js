@@ -213,10 +213,33 @@ async function sendMessageStream(text, loadingId, controller) {
                 } else if (ev === 'tool.started' || ev === 'tool.completed' || ev === 'command.started' || ev === 'command.completed') {
                     sawToolActivity = true;
                     upsertActivity(obj);
+                } else if (ev === 'proposal_created' || ev === 'approval_required') {
+                    // P3-7: agent asks a human to review a change proposal.
+                    // The agent run is NOT complete while cards are pending.
+                    sawToolActivity = true;
+                    if (obj.proposalId) {
+                        if (obj.changes && obj.changes.length) renderProposalCard(obj);
+                        else fetchProposalAndRender(obj.proposalId);
+                    }
+                } else if (ev === 'changes_applied' || ev === 'proposal_approved' || ev === 'proposal_rejected' || ev === 'proposal_stale') {
+                    sawToolActivity = true;
+                    updateProposalCard(obj);
                 } else if (ev === 'message.completed' || ev === 'done') {
                     finalizeActivity();
                     if (!bubble && fullText) bubble = appendStreamingMessage();
                     if (bubble) bubble.textContent = fullText || bubble.textContent;
+                    let pendingCards = 0;
+                    try {
+                        proposalCards.forEach((entry) => { if (entry.state === 'pending') pendingCards += 1; });
+                    } catch {}
+                    if (pendingCards > 0) {
+                        const note = `有 ${pendingCards} 項修改等待批准，請在上方卡片中批准或拒絕。`;
+                        let duplicate = false;
+                        try {
+                            messagesDiv.childNodes.forEach((node) => { if (node.textContent === note) duplicate = true; });
+                        } catch {}
+                        if (!duplicate) appendMessage('ai', note);
+                    }
                     loadSessions();
                 } else if (ev === 'error') {
                     const aborted = obj.code === 'ABORTED' || obj.message === 'aborted';
@@ -623,3 +646,212 @@ function scrollToBottom() {
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
+
+// --- P3-7 Proposal Approval UI ---
+// Agent -> approval_required -> Proposal Card -> human Approve/Reject ->
+// API -> card status update. Cards live in #messages next to chat bubbles
+// but never inside them; the chat/activity/Stop flows are untouched.
+// All untrusted strings (path/diff/message/proposalId) go through
+// textContent only — innerHTML is never assigned proposal data.
+const proposalCards = new Map(); // proposalId -> { root, statusEl, approveBtn, rejectBtn, state }
+
+function proposalOpLabel(op) {
+    if (op === 'create') return '建立';
+    if (op === 'delete') return '刪除';
+    return '更新';
+}
+
+function proposalOpBadgeClass(op) {
+    if (op === 'create') return 'text-emerald-300 border-emerald-700 bg-emerald-950';
+    if (op === 'delete') return 'text-red-300 border-red-700 bg-red-950';
+    return 'text-amber-300 border-amber-700 bg-amber-950';
+}
+
+function renderDiffLine(line) {
+    const div = document.createElement('div');
+    const first = line.charAt(0);
+    if (first === '+' && line.charAt(1) !== '+') div.className = 'text-emerald-300';
+    else if (first === '-' && line.charAt(1) !== '-') div.className = 'text-red-300';
+    else if (first === '@') div.className = 'text-slate-500';
+    else div.className = 'text-slate-400';
+    div.textContent = line;
+    return div;
+}
+
+function renderProposalCard(payload) {
+    const data = payload && typeof payload === 'object' ? payload : {};
+    const proposalId = typeof data.proposalId === 'string' ? data.proposalId : '';
+    if (!proposalId) return null;
+    if (proposalCards.has(proposalId)) return proposalCards.get(proposalId).root;
+    const changes = Array.isArray(data.changes) ? data.changes : [];
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex justify-start min-w-0';
+    wrapper.dataset.proposalId = proposalId;
+    const card = document.createElement('div');
+    card.className = 'bg-slate-900 border border-indigo-500/40 text-slate-200 rounded-2xl px-4 py-3 text-sm max-w-[min(36rem,92vw)] md:max-w-xl leading-relaxed shadow-md w-full min-w-0';
+    wrapper.appendChild(card);
+
+    const title = document.createElement('div');
+    title.className = 'font-semibold text-slate-100 mb-1';
+    title.textContent = `需要批准修改（${changes.length} 個檔案）`;
+    card.appendChild(title);
+
+    const idLine = document.createElement('div');
+    idLine.className = 'text-[11px] text-slate-500 mb-2 break-all';
+    idLine.textContent = proposalId;
+    card.appendChild(idLine);
+
+    for (const ch of changes) {
+        const item = ch && typeof ch === 'object' ? ch : {};
+        const fileBox = document.createElement('details');
+        fileBox.className = 'mb-2 bg-slate-950 border border-slate-800 rounded-lg';
+        fileBox.open = true;
+        const summary = document.createElement('summary');
+        summary.className = 'cursor-pointer px-2 py-1.5 text-xs flex items-center gap-2 min-h-[44px]';
+        const pathEl = document.createElement('span');
+        pathEl.className = 'font-mono break-all flex-1';
+        pathEl.textContent = typeof item.path === 'string' ? item.path : '(unknown)';
+        const badge = document.createElement('span');
+        badge.className = `text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${proposalOpBadgeClass(item.operation)}`;
+        badge.textContent = proposalOpLabel(item.operation);
+        summary.appendChild(pathEl);
+        summary.appendChild(badge);
+        fileBox.appendChild(summary);
+        const diffBox = document.createElement('div');
+        diffBox.className = 'px-2 pb-2 overflow-auto max-h-64 font-mono text-[11px] leading-relaxed whitespace-pre';
+        const diffText = typeof item.diff === 'string' ? item.diff : '';
+        for (const line of diffText.split('\n')) {
+            diffBox.appendChild(renderDiffLine(line));
+        }
+        fileBox.appendChild(diffBox);
+        card.appendChild(fileBox);
+    }
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'text-xs text-amber-300 mb-2';
+    statusEl.textContent = '等待批准';
+    card.appendChild(statusEl);
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'flex gap-2';
+    const rejectBtn = document.createElement('button');
+    rejectBtn.type = 'button';
+    rejectBtn.className = 'flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium py-2 px-3 rounded-xl transition min-h-[44px] disabled:opacity-50';
+    rejectBtn.textContent = '拒絕';
+    const approveBtn = document.createElement('button');
+    approveBtn.type = 'button';
+    approveBtn.className = 'flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 px-3 rounded-xl transition min-h-[44px] disabled:opacity-50';
+    approveBtn.textContent = '批准並套用';
+    rejectBtn.addEventListener('click', () => decideProposal(proposalId, 'reject'));
+    approveBtn.addEventListener('click', () => decideProposal(proposalId, 'apply'));
+    btnRow.appendChild(rejectBtn);
+    btnRow.appendChild(approveBtn);
+    card.appendChild(btnRow);
+
+    messagesDiv.appendChild(wrapper);
+    scrollToBottom();
+    proposalCards.set(proposalId, { root: wrapper, statusEl, approveBtn, rejectBtn, state: 'pending' });
+    return wrapper;
+}
+
+function setProposalState(proposalId, state, message) {
+    const entry = proposalCards.get(proposalId);
+    if (!entry) return false;
+    entry.state = state;
+    if (message !== undefined && message !== null) entry.statusEl.textContent = message;
+    const done = state === 'applied' || state === 'rejected' || state === 'stale' || state === 'error';
+    if (done) {
+        entry.approveBtn.disabled = true;
+        entry.rejectBtn.disabled = true;
+    }
+    if (state === 'applied') entry.statusEl.className = 'text-xs text-emerald-300 mb-2';
+    else if (state === 'rejected') entry.statusEl.className = 'text-xs text-slate-400 mb-2';
+    else if (state === 'stale' || state === 'error') entry.statusEl.className = 'text-xs text-red-300 mb-2';
+    scrollToBottom();
+    return true;
+}
+
+// Human decision: exactly one API call per proposal (busy guard +
+// disabled buttons). Never modifies files locally, never auto-reruns.
+async function decideProposal(proposalId, action) {
+    const entry = proposalCards.get(proposalId);
+    if (!entry || entry.state !== 'pending') return false;
+    entry.state = 'busy';
+    entry.approveBtn.disabled = true;
+    entry.rejectBtn.disabled = true;
+    const verb = action === 'apply' ? 'apply' : 'reject';
+    entry.statusEl.textContent = action === 'apply' ? '套用中…' : '拒絕中…';
+    try {
+        const res = await fetch(`/api/change-proposals/${encodeURIComponent(proposalId)}/${verb}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ sessionId: (typeof currentSessionId === 'string' ? currentSessionId : null) })
+        });
+        if (res.status === 401) {
+            try { loginOverlay.classList.remove('hidden'); } catch {}
+            entry.state = 'pending';
+            entry.approveBtn.disabled = false;
+            entry.rejectBtn.disabled = false;
+            entry.statusEl.textContent = '未授權 (401)：請先登入後再試';
+            return false;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data && (data.status === 'applied' || data.status === 'rejected')) {
+            setProposalState(proposalId, data.status, data.status === 'applied' ? '已套用' : '已拒絕');
+            return true;
+        }
+        const code = (data && (data.code || data.causeCode)) || '';
+        if (code === 'PROPOSAL_STALE' || code === 'PROPOSAL_EXPIRED' || code === 'PROPOSAL_NOT_PENDING') {
+            setProposalState(proposalId, 'stale', '檔案已變更，無法套用。請重新執行 Agent 產生新的修改提案。');
+            return false;
+        }
+        const msg = (data && data.error) || `請求失敗 (${res.status})`;
+        setProposalState(proposalId, 'error', `錯誤：${msg}`);
+        return false;
+    } catch (err) {
+        entry.state = 'pending';
+        entry.approveBtn.disabled = false;
+        entry.rejectBtn.disabled = false;
+        entry.statusEl.textContent = '連線失敗，請稍後再試';
+        return false;
+    }
+}
+
+async function fetchProposalAndRender(proposalId) {
+    if (!proposalId || proposalCards.has(proposalId)) return proposalCards.get(proposalId) || null;
+    try {
+        const qs = (typeof currentSessionId === 'string' && currentSessionId) ? `?sessionId=${encodeURIComponent(currentSessionId)}` : '';
+        const res = await fetch(`/api/change-proposals/${encodeURIComponent(proposalId)}${qs}`, { credentials: 'include' });
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        if (!data || data.proposalId !== proposalId) return null;
+        renderProposalCard(data);
+        if (data.status && data.status !== 'pending') {
+            setProposalState(proposalId, data.status, data.status === 'applied' ? '已套用' : data.status === 'rejected' ? '已拒絕' : `狀態：${data.status}`);
+        }
+        return proposalCards.get(proposalId) || null;
+    } catch {
+        return null;
+    }
+}
+
+function updateProposalCard(obj) {
+    const o = obj && typeof obj === 'object' ? obj : {};
+    if (!o.proposalId || !proposalCards.has(o.proposalId)) return false;
+    if (o.type === 'changes_applied' || o.type === 'proposal_approved') {
+        setProposalState(o.proposalId, 'applied', '已套用');
+    } else if (o.type === 'proposal_rejected') {
+        setProposalState(o.proposalId, 'rejected', '已拒絕');
+    } else if (o.type === 'proposal_stale') {
+        setProposalState(o.proposalId, 'stale', '檔案已變更，無法套用。請重新執行 Agent 產生新的修改提案。');
+    }
+    return true;
+}
+window.renderProposalCard = renderProposalCard;
+window.decideProposal = decideProposal;
+window.updateProposalCard = updateProposalCard;
+window.fetchProposalAndRender = fetchProposalAndRender;
+window.setProposalState = setProposalState;
+window.proposalCards = proposalCards;

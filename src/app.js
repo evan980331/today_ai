@@ -12,6 +12,7 @@ const chatRouter = require('./routes/chat');
 const streamRouter = require('./routes/stream');
 const sessionsRouter = require('./routes/sessions');
 const workspacesRouter = require('./routes/workspaces');
+const changeProposalsRouter = require('./routes/changeProposals');
 const { authMiddleware, loginHandler, logoutHandler, meHandler } = require('./middleware/auth');
 const { loginLimiter } = require('./middleware/rateLimit');
 
@@ -74,6 +75,7 @@ app.use('/api', chatRouter);
 app.use('/api', streamRouter);
 app.use('/api', sessionsRouter);
 app.use('/api', workspacesRouter);
+app.use('/api', changeProposalsRouter);
 
 // Consistent error handler
 // eslint-disable-next-line no-unused-vars
